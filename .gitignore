@@ -6,6 +6,4 @@
 /registered_faces
 /security_system.db
 # Private selective recordings, keys and generated test artifacts
-data/selective/
 tests/runtime/
-*.key
