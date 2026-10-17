@@ -1,12 +1,15 @@
 import io
 import secrets
 import sqlite3
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from core.selective_camera import MainCamera
-from core.selective_crypto import GROUPS, protect, restore_frames, save_chunk
+from core.selective_crypto import GROUPS, RestoreError, protect, restore_frames, save_chunk
 from core.selective_recognition import CPUAdapter, stable_person_id
 
 
@@ -67,6 +70,68 @@ def test_detector_dropout_reuses_bbox_only_inside_hold_window():
     held = camera._hold_detector_dropouts([], previous, 1.0, 1.5)
     assert len(held) == 1 and held[0]['detector_hold'] is True
     assert camera._hold_detector_dropouts([], previous, 1.0, 2.0) == []
+
+
+def test_detector_hold_uses_per_face_real_timestamp_and_does_not_duplicate():
+    camera = MainCamera.__new__(MainCamera)
+    camera.config = SimpleNamespace(FACE_AUTH_HOLD_SECONDS=0.8, FACE_AUTH_TRACK_IOU=0.35)
+    old = {'bbox': [10, 10, 50, 50], 'quality': 0.95,
+           'identity': None, 'similarity': 0.1, 'gallery_valid': True,
+           '_last_real_at': 1.0}
+    held = camera._hold_detector_dropouts([], [old], 1.0, 1.5)
+    assert held[0]['detector_hold'] and held[0]['_last_real_at'] == 1.0
+
+    # A different face must not refresh this held bbox's lifetime.
+    other = {'bbox': [200, 10, 240, 50], 'quality': 0.95,
+             'identity': 'other', 'similarity': 0.9, 'gallery_valid': True}
+    after_expiry = camera._hold_detector_dropouts([other], held, 2.0, 2.0)
+    assert len(after_expiry) == 1 and after_expiry[0]['bbox'] == other['bbox']
+    assert after_expiry[0]['detector_hold'] is False
+
+    # A moved real detection supersedes the held copy, while two genuinely
+    # current detections are both retained.
+    moved = dict(other, bbox=[18, 12, 58, 52])
+    two_people = camera._hold_detector_dropouts([moved, other], [old], 1.0, 1.4)
+    assert len(two_people) == 2
+    assert all(item['detector_hold'] is False for item in two_people)
+
+
+def test_held_face_protects_frame_but_is_not_counted_as_a_new_person():
+    camera = MainCamera.__new__(MainCamera)
+    camera.lock = threading.RLock()
+    camera.config = SimpleNamespace(CAMERA_STALE_SECONDS=3.0)
+    camera.running = True
+    camera.error = None
+    camera.preview = b'jpeg'
+    camera.last_preview_at = time.monotonic()
+    camera.frame_sequence = 7
+    camera.last_read_ms = 4.2
+    camera.last_process_ms = 52.3
+    camera.model_backend = 'test'
+    camera.metrics = {}
+    camera.faces = [
+        {'authorized': True, 'detector_hold': False},
+        {'authorized': False, 'detector_hold': True},
+    ]
+
+    stats = camera.get_stats()
+    assert stats['employee_count'] == 1
+    assert stats['unknown_count'] == 0
+    assert stats['camera_ready'] and stats['camera_state'] == 'live'
+
+    camera.last_preview_at -= 4.0
+    stale = camera.get_stats()
+    assert not stale['camera_ready'] and stale['camera_state'] == 'stale'
+
+    debug = camera.get_debug_info()
+    assert debug['face_diagnostics'][0]['detector_confidence'] is None
+    assert debug['face_diagnostics'][1]['detector_hold'] is True
+    assert debug['recognition_thresholds']['match'] == 0.45
+
+
+def test_cpu_scrfd_threshold_validation_keeps_existing_safe_default():
+    with pytest.raises(RestoreError,match='SCRFD'):
+        CPUAdapter('', '', detector_threshold=0)
 
 
 def test_operational_container_selective_restore_uses_groups(work):

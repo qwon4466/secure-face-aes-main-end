@@ -63,7 +63,7 @@
 </head>
 <body>
     <header class="topbar">
-        <div class="logo">🔒 SecureFace-RX</div>
+        <div class="logo">SecureFace-RX</div>
         <nav class="topnav">
             <a href="/">실시간 모니터링</a>
             <a href="/assets">보호 자산</a>
@@ -73,12 +73,12 @@
 
     <nav class="adminbar" aria-label="관리자 메뉴">
         <span class="label">관리자 메뉴</span>
-        <a class="menu-btn" href="/employees">👥 사원 관리</a>
+        <a class="menu-btn" href="/employees">사원 관리</a>
         <a class="menu-btn" href="/register">＋ 사원 등록</a>
-        <a class="menu-btn" href="/audit">📋 감사 로그</a>
-        <a class="menu-btn" href="/decryption_page">🗂️ 원본 복원</a>
+        <a class="menu-btn" href="/audit">감사 로그</a>
+        <a class="menu-btn" href="/decryption_page">원본 복원</a>
         <a class="menu-btn active" href="/selective/">선택적 복원</a>
-        <button id="logout" class="logout">🚪 로그아웃</button>
+        <button id="logout" class="logout">로그아웃</button>
     </nav>
 
     <main class="page">
@@ -92,7 +92,7 @@
 
         <section class="viewer-panel">
             <div id="viewerInitial" class="initial">
-                <div class="icon">📁</div>
+                <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h7l2 2h9v11H3z"/></svg></div>
                 <h3>좌측에서 복원할 청크를 선택하세요</h3>
             </div>
 
@@ -151,14 +151,14 @@
                 if (date !== lastDate) {
                     const header = document.createElement('div');
                     header.className = 'folder-date';
-                    header.textContent = '📅 ' + date;
+                    header.textContent = date;
                     container.appendChild(header);
                     lastDate = date;
                 }
 
                 const item = document.createElement('div');
                 item.className = 'folder-time' + (selected && selected.id === row.id ? ' selected' : '');
-                item.textContent = '🕒 ' + displayName(row);
+                item.textContent = displayName(row);
                 item.onclick = () => selectChunk(row);
                 container.appendChild(item);
             }
@@ -233,7 +233,7 @@
                 await pollRestore(job.job);
             } catch (error) {
                 status.style.color = '#dc2626';
-                status.textContent = '❌ ' + error.message;
+                status.textContent = error.message;
             } finally {
                 button.disabled = false;
             }
@@ -264,7 +264,7 @@
                     download.href = `/selective/api/jobs/${jobId}/download`;
                     download.style.display = 'block';
                     status.style.color = '#16a34a';
-                    status.textContent = `✅ ${roleText(job.role)} 선택 복원이 완료되었습니다.`;
+                    status.textContent = `${roleText(job.role)} 선택 복원이 완료되었습니다.`;
                     return;
                 }
 

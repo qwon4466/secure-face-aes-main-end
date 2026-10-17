@@ -16,6 +16,14 @@ def test_status_color_and_original_integrity():
     assert protected[70:150,60:130].std()<frame[70:150,60:130].std()/8
     assert korean_font().getmask('허가자').getbbox()
 
+def test_single_group_pixels_stay_exclusive_for_selective_restore():
+    frame=np.random.default_rng(17).integers(0,255,(240,320,3),dtype=np.uint8)
+    box=[40,30,180,170]
+    protected,masks,_=protect(frame,[{'bbox':box,'group':'internal','authorized':True}])
+    assert masks['internal'].sum()==(box[2]-box[0])*(box[3]-box[1])
+    assert not masks['external'].any() and not masks['master'].any()
+    assert np.array_equal(protected[200,250],frame[200,250])
+
 def test_encrypted_buffer_and_label_restore(work):
     keys_dir=work/'keys';generate_keys(keys_dir);keys=keyset(keys_dir)
     frame=np.random.default_rng(8).integers(0,255,(240,320,3),dtype=np.uint8)

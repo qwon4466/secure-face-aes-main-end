@@ -37,28 +37,29 @@
   </style>
 </head>
 <body>
+  {% include "_icons.html" %}
   <div class="topbar">
-    <div class="topbar-logo">🔒 SecureFace-RX</div>
+    <div class="topbar-logo"><svg class="ui-icon" aria-hidden="true"><use href="#icon-lock"></use></svg> SecureFace-RX</div>
     <nav class="topbar-nav">
       <a href="/">실시간 모니터링</a>
       <a href="/assets">보호 자산</a>
-      <a href="/employees" class="active">🔐 관리자</a>
+    <a href="/employees" class="active"><svg class="ui-icon" aria-hidden="true"><use href="#icon-lock"></use></svg> 관리자</a>
     </nav>
   </div>
 
   <div class="subnav">
     <span>관리자 메뉴</span>
-    <a href="/employees">👥 사원 관리</a>
+    <a href="/employees"><svg class="ui-icon" aria-hidden="true"><use href="#icon-user"></use></svg> 사원 관리</a>
     <a href="/register">＋ 사원 등록</a>
-    <a href="/audit" class="active">📋 감사 로그</a>
-    <a href="/decryption_page" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">🗂️ 원본 복원</a>
+    <a href="/audit" class="active">감사 로그</a>
+    <a href="/decryption_page" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg> 원본 복원</a>
 <a href="/selective/" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">선택적 복원</a>
-    <button class="logout" onclick="fetch('/api/admin/logout',{method:'POST'}).then(()=>location.href='/admin/login')">🚪 로그아웃</button>
+    <button class="logout" onclick="fetch('/api/admin/logout',{method:'POST'}).then(()=>location.href='/admin/login')">로그아웃</button>
   </div>
 
   <div class="content">
     <div class="panel">
-      <div class="panel-title">🔓 복원 접근 이력</div>
+      <div class="panel-title"><svg class="ui-icon" aria-hidden="true"><use href="#icon-key"></use></svg> 복원 접근 이력</div>
       <div class="panel-sub">누가 · 언제 · 어떤 영상을 복원(익명화 해제)했는지 기록합니다. (책임성 확보)</div>
       <table>
         <thead><tr><th>시각</th><th>관리자</th><th>청크</th><th>IP</th><th>결과</th></tr></thead>
@@ -67,7 +68,7 @@
     </div>
 
     <div class="panel">
-      <div class="panel-title">🚨 비허가자 감지 이력</div>
+      <div class="panel-title"><svg class="ui-icon" aria-hidden="true"><use href="#icon-alert"></use></svg> 비허가자 감지 이력</div>
       <div class="panel-sub">등록되지 않은 인원(비허가자)이 감지된 이벤트입니다.</div>
       <table>
         <thead><tr><th>시각</th><th>구분</th><th>유사도</th></tr></thead>

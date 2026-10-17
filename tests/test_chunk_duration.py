@@ -1,7 +1,10 @@
 from pathlib import Path
 import secrets
+import threading
+import time
 import numpy as np
 import pytest
+from core import selective_recording
 from core.selective_crypto import GROUPS,RestoreError,inspect_chunk,keyset,generate_keys,restore_frames
 from core.selective_recording import Recorder
 from core.selective_index import completed,find,summary
@@ -39,3 +42,20 @@ def test_partial_directory_is_not_indexed(work):
                    started_at=datetime.now(ZoneInfo('Asia/Seoul')),ended_at=datetime.now(ZoneInfo('Asia/Seoul')))
     assert (final.parent/'.21-34-56.partial').is_dir()
     assert completed(root)==[] and not final.exists()
+
+
+def test_background_chunk_save_does_not_block_next_frame(work,monkeypatch):
+    started=threading.Event();release=threading.Event()
+    def slow_save(output,*args,**kwargs):
+        started.set();assert release.wait(2)
+        return Path(output)/'saved-chunk'
+    monkeypatch.setattr(selective_recording,'save_chunk',slow_save)
+    recorder=Recorder(work/'raw_data',keys(work),fps=10,chunk_frames=2,
+                      background_flush=True)
+    frame=np.zeros((24,32,3),np.uint8)
+    recorder.add(frame,[],0,0)
+    before=time.perf_counter();recorder.add(frame,[],1,100)
+    assert time.perf_counter()-before<0.1 and started.wait(1)
+    recorder.add(frame,[],2,200)
+    release.set();report=recorder.finish()
+    assert report['frames']==3 and len(report['chunks'])==2

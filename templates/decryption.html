@@ -21,11 +21,12 @@
     </style>
 </head>
 <body>
+    {% include "_icons.html" %}
 
     <!-- 1. 최상단 네비게이션 (블랙 톤) -->
     <div style="display:flex; justify-content:space-between; align-items:center; background:#0f172a; padding:15px 24px; border-bottom:1px solid #1e293b; color:white;">
         <div style="font-weight:bold; font-size:18px; display:flex; align-items:center; gap:8px;">
-            🔒 SecureFace-RX
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-lock"></use></svg> SecureFace-RX
         </div>
         <div style="display:flex; gap:20px; font-size:14px; color:#cbd5e1;">
             <a href="/" style="color:#cbd5e1; text-decoration:none;">실시간 모니터링</a>
@@ -38,15 +39,15 @@
     <!-- 2. 관리자 메뉴 (제공해주신 코드 적용 + 원본 복원 버튼 활성화) -->
     <div style="display:flex; gap:8px; align-items:center; padding:10px 24px; background:#0f172a; border-bottom:1px solid #1e293b;">
         <span style="color:#94a3b8; font-weight:600; margin-right:6px; font-size:14px;">관리자 메뉴</span>
-        <a href="/employees" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">👥 사원 관리</a>
+        <a href="/employees" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;"><svg class="ui-icon" aria-hidden="true"><use href="#icon-user"></use></svg> 사원 관리</a>
         <a href="/register" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">＋ 사원 등록</a>
-        <a href="/audit" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">📋 감사 로그</a>
+        <a href="/audit" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">감사 로그</a>
         
         <!-- 원본 복원이 선택된 상태이므로 파란색(3b82f6)으로 하이라이트 -->
-        <a href="/decryption_page" style="padding:7px 14px; border-radius:6px; background:#3b82f6; color:#fff; text-decoration:none; font-size:14px;">🗂️ 원본 복원</a>
+        <a href="/decryption_page" style="padding:7px 14px; border-radius:6px; background:#3b82f6; color:#fff; text-decoration:none; font-size:14px;"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg> 원본 복원</a>
 <a href="/selective/" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">선택적 복원</a>
         
-        <button onclick="fetch('/api/admin/logout',{method:'POST'}).then(()=>location.href='/admin/login')" style="margin-left:auto; padding:7px 14px; border-radius:6px; background:#475569; color:#fff; border:none; cursor:pointer; font-size:14px;">🚪 로그아웃</button>
+        <button onclick="fetch('/api/admin/logout',{method:'POST'}).then(()=>location.href='/admin/login')" style="margin-left:auto; padding:7px 14px; border-radius:6px; background:#475569; color:#fff; border:none; cursor:pointer; font-size:14px;">로그아웃</button>
     </div>
 
     <!-- 3. 메인 콘텐츠 영역 (좌우 2단 분할) -->
@@ -65,7 +66,7 @@
             
             <!-- 최초 안내 화면 -->
             <div id="viewerInitial" style="margin-top: 150px; text-align: center; color: #94a3b8;">
-                <div style="font-size: 48px; margin-bottom: 16px;">📁</div>
+                <div style="font-size: 48px; margin-bottom: 16px;"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg></div>
                 <h3 style="font-weight: 500;">좌측에서 복원할 청크를 선택하세요</h3>
             </div>
 
@@ -104,11 +105,11 @@
                 }
 
                 for (const [date, times] of Object.entries(data)) {
-                    let html = `<div class="folder-date">📅 ${date}</div>`;
+                    let html = `<div class="folder-date"><svg class="ui-icon" aria-hidden="true"><use href="#icon-calendar"></use></svg> ${date}</div>`;
                     times.forEach(time => {
                         const path = `raw_data/${date}/${time}`;
                         html += `<div class="folder-time" onclick="selectChunk(this, '${path}', '${date} ${time}')">
-                                    🕒 ${time}
+                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-clock"></use></svg> ${time}
                                  </div>`;
                     });
                     container.innerHTML += html;
@@ -157,11 +158,11 @@
                 if (response.ok && payload.job_id) {
                     await pollRestore(payload.job_id, statusEl, imgEl);
                 } else {
-                    statusEl.innerText = `❌ 에러: ${payload.detail || '복원 작업 등록 실패'}`;
+                    statusEl.innerText = `에러: ${payload.detail || '복원 작업 등록 실패'}`;
                     statusEl.style.color = "#dc2626";
                 }
             } catch (error) {
-                statusEl.innerText = `❌ ${error.message || '서버 통신 오류'}`;
+                statusEl.innerText = `${error.message || '서버 통신 오류'}`;
                 statusEl.style.color = "#dc2626";
             }
         }
@@ -181,7 +182,7 @@
                     const blob = await result.blob();
                     imgEl.src = URL.createObjectURL(blob);
                     imgEl.style.display = "block";
-                    statusEl.innerText = "✅ 복원이 완료되었습니다.";
+                    statusEl.innerText = "복원이 완료되었습니다.";
                     statusEl.style.color = "#16a34a";
                     return;
                 }

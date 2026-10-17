@@ -91,6 +91,11 @@ DETECT_LOG_COOLDOWN = 10
 MATCH_THRESHOLD = 0.45
 FACE_AUTH_RETAIN_THRESHOLD = 0.40
 FACE_AUTH_TRACK_IOU = 0.35
+# 기존 추적 안정화 기본값을 설정으로 노출한다. 값 자체는 변경하지 않는다.
+FACE_AUTH_CONFIRM_MATCHES = 2
+FACE_AUTH_CONFIRM_WINDOW = 3
+FACE_AUTH_REVOKE_MISMATCHES = 5
+FACE_AUTH_HOLD_SECONDS = 0.8
 
 # Hailo-8L 가속: SCRFD 탐지는 Hailo에서, ArcFace 인식은 CPU에서 실행.
 # True여도 hailo_platform이 없으면 자동으로 insightface(CPU)로 폴백.
@@ -99,6 +104,9 @@ USE_HAILO = True
 SCRFD_HEF_PATH = "/usr/share/hailo-models/scrfd_2.5g_h8l.hef"
 ARCFACE_HEF_PATH = "/usr/share/hailo-models/arcface_mobilefacenet.hef"
 HAILO_DET_THRESH = 0.5
+# Hailo 사용 불가 시 CPU SCRFD 폴백의 기존 임계값. 실장비 검증 없이
+# 낮추지 않고 탐지 신뢰도와 ArcFace 유사도를 별도로 진단한다.
+CPU_SCRFD_DET_THRESHOLD = 0.6
 
 # (참고) zxc.txt 환경에서의 Hailo 모델 경로 변수명
 HAILO_SCRFD_HEF   = "/usr/share/hailo-models/scrfd_2.5g_h8l.hef"
@@ -114,6 +122,9 @@ REALTIME_ANON = "mosaic"
 # 실시간 화면(모자이크 표시) 갱신 fps 상한.
 # 높을수록 화면이 부드러움.
 PROCESS_MAX_FPS = 20
+
+# 이 시간 동안 새 보호 프레임이 없으면 LIVE/REC 상태를 중지 상태로 표시한다.
+CAMERA_STALE_SECONDS = 3.0
 
 # 레거시 PSF Recorder 호환 설정(현재 AES RawRecorder 경로에서 미사용).
 SAVE_FPS = 15
@@ -137,6 +148,13 @@ PROCESS_WIDTH = 640
 # 모든 RGB 카메라는 공통 V4L2 관리자로 자동 선택합니다.
 # RealSense D455도 UVC 장치라 OpenCV(webcam)로 컬러 스트림을 받을 수 있음.
 CAMERA_TYPE = "webcam"
+
+# D457은 Depth/IR/RGB가 별도 V4L2 노드로 노출된다. 운영 경로에서는
+# USB 인터페이스 설명이 RGB인 노드와 YUYV 포맷만 허용한다.
+REQUIRE_REALSENSE_RGB = True
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+CAMERA_FPS = 30
 
 # 장치 번호 기본값 없음. CAMERA_DEVICE 환경변수 또는 V4L2 자동 탐색.
 # 선택된 경로는 실행 중 공통 관리자가 저장합니다.

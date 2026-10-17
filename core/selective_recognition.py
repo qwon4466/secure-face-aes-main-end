@@ -15,6 +15,11 @@ from .selective_crypto import ROOT, RestoreError
 
 PROJECT=ROOT
 
+# Approved AST digest of camera_stream._cosine_sim.  Keep this pin in sync only
+# after reviewing the function's numerical behaviour; a source edit must not
+# silently become trusted.
+_COSINE_AST_SHA256 = '21b3ad196d99c6547c36ddb24136bffdb9cfeca8cab8cd60022eb5be97058b4e'
+
 # Registration appends only these known suffixes.  Keep user supplied
 # underscores intact (for example ``unit_a`` remains ``unit_a``).
 _PERSON_SUFFIXES = (
@@ -47,7 +52,7 @@ def legacy_components():
         spec.loader.exec_module(module)
     tree=ast.parse((PROJECT/'camera_stream.py').read_text())
     node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_cosine_sim')
-    if hashlib.sha256(ast.dump(node).encode()).hexdigest() != '58e9e0c8248575b638006a60fceaf085b3b8d9d9355ae9fea314920ee3193c40':
+    if hashlib.sha256(ast.dump(node).encode()).hexdigest() != _COSINE_AST_SHA256:
         raise RestoreError('cosine 함수 변경: 재검토 필요')
     scope={'np':np}
     exec(compile(ast.Module(body=[node],type_ignores=[]),str(PROJECT/'camera_stream.py'),'exec'),scope)
@@ -80,14 +85,19 @@ class Classifier:
             old=previous[candidates[0]] if len(candidates)==1 and usage[candidates[0]]==1 else None
             score=o.get('similarity'); identity=o.get('identity')
             reliable=o.get('quality',0)>=p.quality and o.get('gallery_valid',False) and score is not None and np.isfinite(score)
-            evidence='master'
-            if reliable and score>=p.internal_score and identity:
-                evidence='internal'
-            elif reliable and score<=p.external_score:
-                evidence='external'
-            token=identity if evidence=='internal' else evidence
-            consistent=old is not None and old['evidence']==evidence and old['token']==token
-            streak=old['streak']+1 if consistent else 1
+            if o.get('detector_hold') and old is not None:
+                # A held bbox is protection continuity, not new recognition
+                # evidence.  Preserve the track without extending its lifetime.
+                evidence=old['evidence'];token=old['token'];streak=old['streak']
+            else:
+                evidence='master'
+                if reliable and score>=p.internal_score and identity:
+                    evidence='internal'
+                elif reliable and score<=p.external_score:
+                    evidence='external'
+                token=identity if evidence=='internal' else evidence
+                consistent=old is not None and old['evidence']==evidence and old['token']==token
+                streak=old['streak']+1 if consistent else 1
             if old is None:
                 self.next_id+=1
             track=old['track_id'] if old else self.next_id
@@ -96,25 +106,32 @@ class Classifier:
             current.append({**o,'group':group,'track_id':track,'streak':streak,'evidence':evidence,'token':token,
                             'reason':'consistent' if group!='master' else 'uncertain_or_track_reset'})
         self.previous=current; self.last_capture=capture_id
-        return [{k:v for k,v in o.items() if k not in ('identity','token')} for o in current]
+        return [{k:v for k,v in o.items() if k not in ('identity','token','_last_real_at')} for o in current]
 
 class CPUAdapter:
     """Same SCRFD/ArcFace detector.detect + norm_crop + get_feat as CameraProcessor._process.
     Explicit local ONNX models only; no FaceAnalysis model downloader or legacy recorder.
     """
-    def __init__(self, detector_path, recognizer_path, gallery=None):
+    def __init__(self, detector_path, recognizer_path, gallery=None,
+                 detector_override=None, detector_threshold=0.6):
         self.Result,self.cosine=legacy_components()
-        paths=[Path(detector_path),Path(recognizer_path)]
+        if not isinstance(detector_threshold,(int,float)) or not 0<detector_threshold<=1:
+            raise RestoreError('SCRFD 탐지 임계값은 0과 1 사이여야 합니다')
+        paths=[Path(recognizer_path)]
+        if detector_override is None:
+            paths.append(Path(detector_path))
         if any(not p.is_file() or p.suffix!='.onnx' for p in paths):
             raise RestoreError('실제 SCRFD / ArcFace ONNX 모델 파일을 지정하세요')
         from insightface.model_zoo import get_model
         from insightface.utils import face_align
         self.align=face_align.norm_crop
-        self.detector=get_model(str(paths[0]),providers=['CPUExecutionProvider'])
-        self.recognizer=get_model(str(paths[1]),providers=['CPUExecutionProvider'])
+        self.detector=(detector_override if detector_override is not None else
+                       get_model(str(detector_path),providers=['CPUExecutionProvider']))
+        self.recognizer=get_model(str(recognizer_path),providers=['CPUExecutionProvider'])
         if not hasattr(self.detector,'detect') or not hasattr(self.recognizer,'get_feat'):
             raise RestoreError('SCRFD 탐지 모델 / ArcFace 인식 모델 종류를 확인하세요')
-        self.detector.prepare(ctx_id=-1,input_size=(640,640),det_thresh=0.6)
+        if detector_override is None:
+            self.detector.prepare(ctx_id=-1,input_size=(640,640),det_thresh=float(detector_threshold))
         self.recognizer.prepare(ctx_id=-1)
         self.reload_gallery(gallery)
 
@@ -148,16 +165,22 @@ class CPUAdapter:
             lm=landmarks[i] if landmarks is not None else None
             det=self.Result(coords,float(b[4]),lm)
             score=None; identity=None
+            recognition_status=('no_registered_users' if not self.users else
+                                'landmarks_missing')
             if lm is not None and np.isfinite(lm).all() and self.users:
                 try:
                     emb=self.recognizer.get_feat(self.align(frame,landmark=lm,image_size=112))
                     if emb is not None and np.isfinite(emb).all():
                         ranked=[(self.cosine(emb,v),n) for n,v in self.users]
                         score,identity=max(ranked)
+                        recognition_status='compared'
+                    else:
+                        recognition_status='embedding_failed'
                 except Exception as exc:
+                    recognition_status='embedding_failed'
                     print('[ArcFace] 임베딩 생성 실패: 비허가자 표시 / 전체키 전용:',type(exc).__name__,flush=True)
             out.append({'bbox':det.bbox,'quality':det.conf,'similarity':score,'identity':identity,
-                        'gallery_valid':bool(self.users)})
+                        'gallery_valid':bool(self.users),'recognition_status':recognition_status})
         return out
 
 class SyntheticAdapter:

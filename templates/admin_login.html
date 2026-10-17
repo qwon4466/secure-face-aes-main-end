@@ -48,8 +48,9 @@
     </style>
 </head>
 <body>
+    {% include "_icons.html" %}
     <div class="login-card">
-        <div class="lock">🔐</div>
+        <div class="lock"><svg class="ui-icon" aria-hidden="true"><use href="#icon-lock"></use></svg></div>
         <h2>관리자</h2>
         <div class="sub">사원 등록·관리는 관리자만 접근할 수 있습니다.</div>
 
@@ -116,15 +117,15 @@
                         // 회원가입 성공 → 로그인 탭으로 전환
                         setMode('login');
                         msg.className = 'msg ok';
-                        msg.innerText = '✅ 가입 완료! 로그인하세요.';
+                        msg.innerText = '가입 완료! 로그인하세요.';
                     }
                 } else {
                     msg.className = 'msg error';
-                    msg.innerText = '❌ ' + (d.detail || '처리 실패');
+                    msg.innerText = d.detail || '처리 실패';
                 }
             } catch (e) {
                 msg.className = 'msg error';
-                msg.innerText = '❌ 서버 연결 실패';
+                msg.innerText = '서버 연결 실패';
             } finally {
                 btn.disabled = false;
                 btn.innerText = mode === 'login' ? '로그인' : '회원가입';

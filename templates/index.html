@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>보안 구역 인원 등록 시스템</title>
     <style>
-        /* ⭐️ 라이트 모드로 전체 배경 및 글자색 변경 */
+        /* 라이트 모드로 전체 배경 및 글자색 변경 */
         body {
             font-family: 'Malgun Gothic', sans-serif;
             background-color: #f4f7f6; /* 밝은 회색 배경 */
@@ -55,7 +55,7 @@
         }
         button.reset-btn:hover { background-color: #5b6eae; }
 
-        /* ⭐️ 관제화면으로 돌아가기 버튼 스타일 */
+        /* 관제화면으로 돌아가기 버튼 스타일 */
         button.return-btn {
             padding: 12px 24px; font-size: 16px; font-weight: bold; background-color: #6c757d; color: white; border: none; border-radius: 5px; cursor: pointer; display: none; transition: 0.3s; margin-left: 10px;
         }
@@ -77,6 +77,7 @@
     </style>
 </head>
 <body>
+    {% include "_icons.html" %}
 
     <div id="loginScreen">
         <h2>보안 관리자 로그인</h2>
@@ -89,13 +90,13 @@
     <div id="mainScreen">
         <div style="position:fixed; top:0; left:0; right:0; display:flex; gap:8px; align-items:center; padding:10px 24px; background:#0f172a; border-bottom:1px solid #1e293b; z-index:100;">
           <span style="color:#94a3b8; font-weight:600; margin-right:6px; font-size:14px;">관리자 메뉴</span>
-          <a href="/employees" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">👥 사원 관리</a>
+          <a href="/employees" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;"><svg class="ui-icon" aria-hidden="true"><use href="#icon-user"></use></svg> 사원 관리</a>
           <a href="/register" style="padding:7px 14px; border-radius:6px; background:#3b82f6; color:#fff; text-decoration:none; font-size:14px;">＋ 사원 등록</a>
           
-          <a href="/audit" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">📋 감사 로그</a>
-          <a href="/decryption_page" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">🗂️ 원본 복원</a>
+          <a href="/audit" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">감사 로그</a>
+          <a href="/decryption_page" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg> 원본 복원</a>
 <a href="/selective/" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">선택적 복원</a>
-          <button onclick="logout()" style="margin-left:auto; padding:7px 14px; border-radius:6px; background:#475569; color:#fff; border:none; cursor:pointer; font-size:14px;">🚪 로그아웃</button>
+          <button onclick="logout()" style="margin-left:auto; padding:7px 14px; border-radius:6px; background:#475569; color:#fff; border:none; cursor:pointer; font-size:14px;">로그아웃</button>
         </div>
         <h2>보안 구역 인원 등록</h2>
         <div id="welcomeMessage" style="color: #7289da; font-size: 20px; font-weight: bold; margin-bottom: 20px;"></div>
@@ -117,9 +118,9 @@
         <img id="video" width="640" height="480" alt="카메라 스트리밍">
         
         <br>
-        <button class="capture-btn" id="captureBtn" onclick="startContinuousCapture()">🎥 연속 촬영 시작</button>
-        <button class="reset-btn" id="resetBtn" onclick="resetForNewPerson()">🔄 다른 인원 새로 등록하기</button>
-        <button class="return-btn" id="returnBtn" onclick="location.href='/'">🏠 관제화면으로 돌아가기</button>
+        <button class="capture-btn" id="captureBtn" onclick="startContinuousCapture()"><svg class="ui-icon" aria-hidden="true"><use href="#icon-video"></use></svg> 연속 촬영 시작</button>
+        <button class="reset-btn" id="resetBtn" onclick="resetForNewPerson()">다른 인원 새로 등록하기</button>
+        <button class="return-btn" id="returnBtn" onclick="location.href='/'">관제화면으로 돌아가기</button>
 
         <div id="statusMessage"></div>
     </div>
@@ -131,7 +132,7 @@
         const nameInput = document.getElementById('nameInput');
         const captureBtn = document.getElementById('captureBtn');
         const resetBtn = document.getElementById('resetBtn');
-        const returnBtn = document.getElementById('returnBtn'); // ⭐️ 복귀 버튼 변수 추가
+        const returnBtn = document.getElementById('returnBtn'); // 복귀 버튼 변수
         const progressContainer = document.getElementById('progressContainer');
         const progressBar = document.getElementById('progressBar');
         
@@ -142,7 +143,7 @@
         window.addEventListener('DOMContentLoaded', () => {
             document.getElementById('loginScreen').style.display = 'none';
             document.getElementById('mainScreen').style.display = 'block';
-            document.getElementById('welcomeMessage').innerText = "🎉 환영합니다, 관리자님!";
+                document.getElementById('welcomeMessage').innerText = "환영합니다, 관리자님!";
             startCamera();
         });
 
@@ -175,7 +176,7 @@
             captureBtn.disabled = true;
             captureBtn.innerText = "촬영 진행 중...";
             
-            instructionText.innerText = "📷 천천히 고개를 좌우로 한 바퀴 돌려주세요!";
+            instructionText.innerText = "천천히 고개를 좌우로 한 바퀴 돌려주세요!";
             instructionText.style.color = "#faa61a"; // 주황색
             statusMessage.style.color = "#333333";
             statusMessage.innerText = "서버에서 얼굴 특징을 추출하고 있습니다...";
@@ -205,34 +206,34 @@
                 progressBar.style.width = "100%"; // 완료
 
                 if (data.status === 'success') {
-                    instructionText.innerText = "🎉 등록이 완료되었습니다!";
+                    instructionText.innerText = "등록이 완료되었습니다!";
                     instructionText.style.color = "#7289da";
                     statusMessage.style.color = "#28a745";
-                    statusMessage.innerText = "✅ 다양한 각도의 얼굴 특징점이 성공적으로 DB에 저장되었습니다.";
+                    statusMessage.innerText = "다양한 각도의 얼굴 특징점이 성공적으로 DB에 저장되었습니다.";
                     
-                    // ⭐️ 등록 완료 시 버튼 전환
+                    // 등록 완료 시 버튼 전환
                     captureBtn.style.display = "none";
                     resetBtn.style.display = "inline-block";
                     returnBtn.style.display = "inline-block"; // 관제화면 복귀 버튼 표시
                 } else {
-                    instructionText.innerText = "⚠️ 등록 실패";
+                    instructionText.innerText = "등록 실패";
                     instructionText.style.color = "#dc3545";
                     statusMessage.style.color = "#dc3545";
                     statusMessage.innerText = data.message || "서버 판별 중 문제가 발생했습니다. 다시 시도해주세요.";
                     
                     captureBtn.disabled = false;
-                    captureBtn.innerText = "🎥 다시 촬영하기";
+                    captureBtn.innerText = "다시 촬영하기";
                 }
             })
             .catch(error => {
                 clearInterval(progressInterval);
-                instructionText.innerText = "⚠️ 서버 통신 오류";
+                instructionText.innerText = "서버 통신 오류";
                 instructionText.style.color = "#dc3545";
                 statusMessage.style.color = "#dc3545";
                 statusMessage.innerText = "파이썬 서버가 켜져 있는지 확인하세요.";
                 
                 captureBtn.disabled = false;
-                captureBtn.innerText = "🎥 다시 촬영하기";
+                captureBtn.innerText = "다시 촬영하기";
             });
         }
 
@@ -249,12 +250,12 @@
             progressContainer.style.display = "none";
             progressBar.style.width = "0%";
             
-            // ⭐️ 초기화 시 버튼 원상복구
+            // 초기화 시 버튼 원상복구
             resetBtn.style.display = "none";
             returnBtn.style.display = "none"; // 관제화면 복귀 버튼 숨김
             captureBtn.style.display = "inline-block";
             captureBtn.disabled = false;
-            captureBtn.innerText = "🎥 연속 촬영 시작";
+            captureBtn.innerText = "연속 촬영 시작";
             captureBtn.style.backgroundColor = "#43b581";
             
             nameInput.focus();

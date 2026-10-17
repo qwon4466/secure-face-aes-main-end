@@ -151,29 +151,30 @@
   </style>
 </head>
 <body>
+{% include "_icons.html" %}
 
 <!-- 상단 바 -->
 <div class="topbar">
-  <div class="topbar-logo">🔒 SecureFace<span>-RX</span></div>
+  <div class="topbar-logo"><svg class="ui-icon" aria-hidden="true"><use href="#icon-lock"></use></svg> SecureFace<span>-RX</span></div>
   <nav class="topbar-nav">
     <a href="/">실시간 모니터링</a>
     <a href="/assets">보호 자산</a>
-    <a href="/employees" class="active">🔐 관리자</a>
+    <a href="/employees" class="active"><svg class="ui-icon" aria-hidden="true"><use href="#icon-lock"></use></svg> 관리자</a>
   </nav>
 </div>
 
 <!-- 관리자 서브 메뉴 (사원 관리 / 사원 등록) -->
 <div style="display:flex; gap:8px; align-items:center; padding:10px 24px; background:#0f172a; border-bottom:1px solid #1e293b;">
   <span style="color:#94a3b8; font-weight:600; margin-right:6px; font-size:14px;">관리자 메뉴</span>
-  <a href="/employees" style="padding:7px 14px; border-radius:6px; background:#3b82f6; color:#fff; text-decoration:none; font-size:14px;">👥 사원 관리</a>
+  <a href="/employees" style="padding:7px 14px; border-radius:6px; background:#3b82f6; color:#fff; text-decoration:none; font-size:14px;"><svg class="ui-icon" aria-hidden="true"><use href="#icon-user"></use></svg> 사원 관리</a>
   <a href="/register" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">＋ 사원 등록</a>
-  <a href="/audit" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">📋 감사 로그</a>
+  <a href="/audit" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">감사 로그</a>
   
-  <!-- 👇 새로 추가된 원본 복원 탭 👇 -->
-  <a href="/decryption_page" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">🗂️ 원본 복원</a>
+  <!-- 원본 복원 탭 -->
+  <a href="/decryption_page" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg> 원본 복원</a>
 <a href="/selective/" style="padding:7px 14px; border-radius:6px; background:#1e293b; color:#e2e8f0; text-decoration:none; font-size:14px; border:1px solid #334155;">선택적 복원</a>
   
-  <button onclick="fetch('/api/admin/logout',{method:'POST'}).then(()=>location.href='/admin/login')" style="margin-left:auto; padding:7px 14px; border-radius:6px; background:#475569; color:#fff; border:none; cursor:pointer; font-size:14px;">🚪 로그아웃</button>
+  <button onclick="fetch('/api/admin/logout',{method:'POST'}).then(()=>location.href='/admin/login')" style="margin-left:auto; padding:7px 14px; border-radius:6px; background:#475569; color:#fff; border:none; cursor:pointer; font-size:14px;">로그아웃</button>
 </div>
 
 <div class="content">
@@ -187,14 +188,14 @@
   <!-- 통계 칩 -->
   <div class="stat-row">
     <div class="stat-chip">
-      <div class="stat-chip-icon">👤</div>
+      <div class="stat-chip-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-user"></use></svg></div>
       <div>
         <div class="stat-chip-label">전체 사원</div>
         <div class="stat-chip-value" id="totalCount">-</div>
       </div>
     </div>
     <div class="stat-chip">
-      <div class="stat-chip-icon">🏷️</div>
+      <div class="stat-chip-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-tag"></use></svg></div>
       <div>
         <div class="stat-chip-label">등록 그룹</div>
         <div class="stat-chip-value" id="groupCount">-</div>
@@ -231,7 +232,7 @@
 <!-- 삭제 확인 모달 -->
 <div class="modal-backdrop" id="delModal">
   <div class="modal">
-    <div class="modal-icon">⚠️</div>
+    <div class="modal-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-alert"></use></svg></div>
     <div class="modal-title">사원 삭제</div>
     <div class="modal-desc">
       <strong id="delName"></strong> 사원의 모든 등록 정보를 삭제합니다.<br>
@@ -274,7 +275,7 @@
     if (list.length === 0) {
       tbody.innerHTML = `<tr><td colspan="4">
         <div class="empty-state">
-          <div class="empty-icon">👤</div>
+          <div class="empty-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-user"></use></svg></div>
           <div class="empty-text">등록된 사원이 없습니다.<br><a href="/register" style="color:#3B82F6">사원 등록</a>으로 추가하세요.</div>
         </div>
       </td></tr>`;

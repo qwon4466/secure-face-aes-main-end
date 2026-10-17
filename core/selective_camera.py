@@ -6,6 +6,7 @@ import sqlite3
 import shutil
 import threading
 import time
+import traceback
 import cv2
 import numpy as np
 from .selective_crypto import ROOT, RestoreError, generate_keys, keyset, private_dir, protect
@@ -45,6 +46,9 @@ class MainCamera:
         self.lock=threading.RLock();self.thread=None;self.stop_event=threading.Event()
         self.preview=None;self.raw=None;self.detector=None;self.recognizer=None;self.adapter=None
         self.error=None;self.faces=[];self.metrics={};self.running=False;self.recorder=None
+        self.model_backend='initializing'
+        self.last_preview_at=None;self.frame_sequence=0
+        self.last_read_ms=0.0;self.last_process_ms=0.0
 
     def reload_db(self):
         if self.adapter is not None and not self.test:
@@ -59,7 +63,29 @@ class MainCamera:
             candidates=list(modeldir.glob('*.onnx'))
             detector=next((str(p) for p in candidates if 'scrfd' in p.name.lower() or p.name.lower().startswith('det_')),'')
             recognizer=next((str(p) for p in candidates if 'w600k' in p.name.lower() or 'rec' in p.name.lower()),'')
-        adapter=CPUAdapter(detector,recognizer,self.gallery_path if Path(self.gallery_path).is_file() else None)
+        detector_override=None
+        if getattr(self.config,'USE_HAILO',False):
+            try:
+                from hailo_infer import HAILO_AVAILABLE, HailoSCRFD
+                if not HAILO_AVAILABLE:
+                    raise RuntimeError('hailo_platform을 현재 Python 환경에서 불러올 수 없습니다')
+                detector_override=HailoSCRFD(
+                    getattr(self.config,'SCRFD_HEF_PATH'),
+                    conf_thresh=float(getattr(self.config,'HAILO_DET_THRESH',0.5)),
+                )
+                self.model_backend='Hailo-8L SCRFD + CPU ArcFace'
+                print('[AI] Hailo-8L SCRFD 로드 성공',flush=True)
+            except Exception as exc:
+                self.model_backend='CPU SCRFD + CPU ArcFace (Hailo fallback)'
+                print(f'[AI] Hailo SCRFD 초기화 실패: {exc} → CPU SCRFD 폴백',flush=True)
+        else:
+            self.model_backend='CPU SCRFD + CPU ArcFace'
+        adapter=CPUAdapter(detector,recognizer,
+                           self.gallery_path if Path(self.gallery_path).is_file() else None,
+                           detector_override=detector_override,
+                           detector_threshold=float(getattr(
+                               self.config,'CPU_SCRFD_DET_THRESHOLD',0.6)))
+        print(f'[AI] 모델 준비 완료: {self.model_backend}',flush=True)
         self.detector=adapter.detector;self.recognizer=adapter.recognizer
         return adapter
 
@@ -92,6 +118,15 @@ class MainCamera:
                 'authorized':False,'hold_until':0.0
             })
             state=dict(previous)
+
+            if observation.get('detector_hold'):
+                # Held detections keep the prior display/storage decision only.
+                # They are not fresh ArcFace evidence and must not advance or
+                # revoke authorization state.
+                face['authorized']=bool(state.get('authorized',False))
+                face['group']='internal' if face['authorized'] else 'external'
+                next_states[track]=state
+                continue
 
             valid=(face.get('gallery_valid',False) and identity is not None and
                    score is not None and np.isfinite(score))
@@ -144,18 +179,33 @@ class MainCamera:
 
     def _hold_detector_dropouts(self, observations, previous_observations,
                                 last_detected_at, now):
-        """Reuse a recent bbox during a brief detector miss only."""
-        if not previous_observations or now-last_detected_at > float(getattr(self.config,'FACE_AUTH_HOLD_SECONDS',0.8)):
-            return observations
+        """Reuse each bbox briefly, measured from its own last real detection."""
+        hold=float(getattr(self.config,'FACE_AUTH_HOLD_SECONDS',0.8))
         threshold=float(getattr(self.config,'FACE_AUTH_TRACK_IOU',0.35))
-        current=list(observations)
-        if not current:
-            current=[dict(item,quality=0.0,detector_hold=True) for item in previous_observations]
+        current=[dict(item,detector_hold=False,_last_real_at=now) for item in observations]
+        if not previous_observations or hold<=0:
             return current
+
+        def same_region(a,b):
+            if iou(a,b)>=threshold:
+                return True
+            aw,ah=a[2]-a[0],a[3]-a[1];bw,bh=b[2]-b[0],b[3]-b[1]
+            if min(aw,ah,bw,bh)<=0:
+                return False
+            size_ratio=min(aw*ah,bw*bh)/max(aw*ah,bw*bh)
+            dx=(a[0]+a[2]-b[0]-b[2])/2;dy=(a[1]+a[3]-b[1]-b[3])/2
+            radius=0.45*max(aw,ah,bw,bh)
+            return size_ratio>=0.4 and dx*dx+dy*dy<=radius*radius
+
         for old in previous_observations:
-            if any(iou(old['bbox'],item['bbox'])>=threshold for item in current):
+            last_real=float(old.get('_last_real_at',last_detected_at))
+            if now-last_real>hold:
                 continue
-            held=dict(old,quality=0.0,detector_hold=True)
+            # A nearby real detection supersedes the old bbox.  This only drops
+            # the held copy; it never merges or removes current real detections.
+            if any(same_region(old['bbox'],item['bbox']) for item in current):
+                continue
+            held=dict(old,quality=0.0,detector_hold=True,_last_real_at=last_real)
             current.append(held)
         return current
 
@@ -166,10 +216,12 @@ class MainCamera:
             self.adapter=self._adapter()
             classifier=Classifier(Policy(track_iou=float(getattr(self.config,'FACE_AUTH_TRACK_IOU',0.35))))
             display_states={}
-            previous_observations=[];last_detected_at=-1e9
+            previous_observations=[];last_detected_at=-1e9;last_ai_error_log=0.0
             fps=getattr(self.config,'SELECTIVE_FPS',10)
             duration=getattr(self.config,'CHUNK_SECONDS',None) if self.operational else None
-            self.recorder=Recorder(self.chunks,self.keys,fps=fps,chunk_frames=getattr(self.config,'SELECTIVE_CHUNK_FRAMES',8),duration=duration)
+            self.recorder=Recorder(self.chunks,self.keys,fps=fps,
+                                   chunk_frames=getattr(self.config,'SELECTIVE_CHUNK_FRAMES',8),
+                                   duration=duration,background_flush=True)
             source=getattr(self.config,'SELECTIVE_SOURCE','')
             if not source and getattr(self.config,'FORCE_VIDEO',False):source=getattr(self.config,'VIDEO_FALLBACK',None)
             is_file=bool(source)
@@ -194,13 +246,15 @@ class MainCamera:
                     if capture>=limit:break
                     frame=synthetic_frame(capture)
                 else:
+                    read_started=time.monotonic()
                     ok,frame=cap.read()
+                    self.last_read_ms=(time.monotonic()-read_started)*1000
                     if not ok:
                         if is_file:break
                         if self.recorder.duration:self.recorder.abort()
                         else:self.recorder.flush()
                         classifier=Classifier(Policy(track_iou=float(getattr(self.config,'FACE_AUTH_TRACK_IOU',0.35))))
-                        display_states={}
+                        display_states={};previous_observations=[];last_detected_at=-1e9
                         with self.lock:
                             self.error='카메라 연결 끊김: 재연결 중';self.preview=None;self.raw=None;self.faces=[]
                         print('[Camera] 프레임 읽기 실패: 동일 장치 재연결 시도',flush=True)
@@ -214,7 +268,16 @@ class MainCamera:
                 if width and frame.shape[1]>width:
                     height=int(frame.shape[0]*width/frame.shape[1])//2*2
                     frame=cv2.resize(frame,(width//2*2,height))
-                detected=self.adapter.observe(frame,capture)
+                try:
+                    detected=self.adapter.observe(frame,capture)
+                except Exception as exc:
+                    with self.lock:
+                        self.error=f'AI 프레임 처리 오류: {exc}';self.faces=[]
+                    if tick-last_ai_error_log>=5:
+                        print(f'[AI][ERROR] 프레임 {capture} 처리 실패: {exc}',flush=True)
+                        last_ai_error_log=tick
+                    self.stop_event.wait(.25)
+                    continue
                 if detected:
                     last_detected_at=tick
                 observations=self._hold_detector_dropouts(
@@ -228,21 +291,32 @@ class MainCamera:
                 ok,jpg=cv2.imencode('.jpg',protected)
                 if not ok:raise RestoreError('보호 프레임 인코딩 실패')
                 with self.lock:
-                    self.preview=jpg.tobytes();self.raw=frame.copy();self.faces=faces;self.metrics=self.recorder.stats()
+                    self.preview=jpg.tobytes();self.raw=frame.copy();self.faces=faces
+                    self.last_preview_at=time.monotonic();self.frame_sequence+=1
+                    self.last_process_ms=(self.last_preview_at-tick)*1000
+                    self.error=None;self.metrics=self.recorder.stats()
                 capture+=1
                 self.stop_event.wait(max(0,1/fps-(time.monotonic()-tick)))
             report=self.recorder.finish()
             with self.lock:self.metrics=report
         except Exception as exc:
-            if self.recorder:self.recorder.abort()
+            if self.recorder:self.recorder.close()
             with self.lock:self.error=str(exc)
+            print(f'[Camera][ERROR] 처리 스레드 종료: {exc}',flush=True)
+            traceback.print_exc()
         finally:
             if cap:cap.release()
             with self.lock:self.running=False
 
     def stop(self):
         self.stop_event.set()
-        if self.thread:self.thread.join(timeout=15)
+        if self.thread:
+            # The systemd unit allows 30 seconds for shutdown.  Give an active
+            # background chunk save time to finish before native model threads
+            # are torn down with the Python process.
+            self.thread.join(timeout=25)
+            if self.thread.is_alive():
+                print('[Camera][WARN] 종료 대기 초과: 녹화 청크 저장/카메라 읽기 상태 확인 필요',flush=True)
 
     def get_jpeg(self):
         with self.lock:return self.preview
@@ -254,17 +328,52 @@ class MainCamera:
         with self.lock:return None if self.raw is None else self.raw.copy()
     def get_stats(self):
         with self.lock:
-            return {'employee_count':sum(f.get('authorized',False) for f in self.faces),
-                    'unknown_count':sum(not f.get('authorized',False) for f in self.faces),
-                    'recording':self.running and self.error is None,'error':self.error,
+            age=None if self.last_preview_at is None else max(0.0,time.monotonic()-self.last_preview_at)
+            stale=float(getattr(self.config,'CAMERA_STALE_SECONDS',3.0))
+            ready=(self.running and self.error is None and self.preview is not None and
+                   age is not None and age<=stale)
+            state=('live' if ready else 'error' if self.error else
+                   'stale' if self.running and self.preview is not None else
+                   'starting' if self.running else 'stopped')
+            real_faces=[f for f in self.faces if not f.get('detector_hold',False)]
+            return {'employee_count':sum(f.get('authorized',False) for f in real_faces),
+                    'unknown_count':sum(not f.get('authorized',False) for f in real_faces),
+                    'detected_face_count':len(real_faces),
+                    'held_face_count':sum(f.get('detector_hold',False) for f in self.faces),
+                    'recording':ready,'error':self.error,'camera_ready':ready,
+                    'camera_state':state,'model_backend':self.model_backend,
+                    'frame_sequence':self.frame_sequence,
+                    'frame_age_ms':None if age is None else round(age*1000,1),
+                    'camera_read_ms':round(self.last_read_ms,1),
+                    'frame_process_ms':round(self.last_process_ms,1),
                     'selective_restore':True,'camera':dict(SELECTED),**self.metrics}
     def get_save_progress(self):
         with self.lock:return self.recorder.progress() if self.recorder else {'in_progress':False}
     def get_perf(self):
         with self.lock:return self.metrics.copy()
-    def get_debug_info(self):return self.get_stats()
+    def get_debug_info(self):
+        stats=self.get_stats()
+        with self.lock:
+            stats['face_diagnostics']=[{
+                'track_id':f.get('track_id'),
+                'bbox':f.get('bbox'),
+                'detector_confidence':f.get('quality'),
+                'arcface_similarity':f.get('similarity'),
+                'recognition_status':f.get('recognition_status','unknown'),
+                'authorized':bool(f.get('authorized',False)),
+                'detector_hold':bool(f.get('detector_hold',False)),
+            } for f in self.faces]
+        stats['recognition_thresholds']={
+            'match':float(getattr(self.config,'MATCH_THRESHOLD',0.45)),
+            'retain':float(getattr(self.config,'FACE_AUTH_RETAIN_THRESHOLD',0.40)),
+            'hailo_scrfd':float(getattr(self.config,'HAILO_DET_THRESH',0.5)),
+            'cpu_scrfd':float(getattr(self.config,'CPU_SCRFD_DET_THRESHOLD',0.6)),
+        }
+        return stats
     def web_state(self):
-        with self.lock:return {'recording':self.running,'error':self.error,'faces':self.faces.copy(),'stats':self.metrics.copy()}
+        stats=self.get_stats()
+        with self.lock:return {'recording':stats['recording'],'error':self.error,
+                               'faces':self.faces.copy(),'stats':self.metrics.copy()}
 
     def list_assets(self):
         from .selective_index import completed, summary

@@ -280,12 +280,14 @@ def protect(frame, faces):
     masks = {g: np.zeros((h, w), dtype=bool) for g in GROUPS}
     protected = frame.copy()
     records = []
+    groups_present = set()
     # Blur each expanded ROI from the SAME original, never from already blurred frames.
     # Reduced ROI Gaussian blur bounds CPU cost; originals remain untouched.
     for face in faces:
         group = face.get('group', 'master')
         if group not in GROUPS:
             raise RestoreError('집단 오류')
+        groups_present.add(group)
         box = face['bbox']
         if len(box) != 4 or any(type(v) is not int for v in box):
             raise RestoreError('bbox 오류')
@@ -307,9 +309,13 @@ def protect(frame, faces):
     kernel = np.ones((GUARD*2+1, GUARD*2+1), np.uint8)
     exclusive = {}
     for g in GROUPS[:2]:
-        others = np.logical_or.reduce([masks[k] for k in GROUPS if k != g])
-        forbidden = cv2.dilate(others.astype(np.uint8), kernel).astype(bool)
-        exclusive[g] = masks[g] & ~forbidden
+        if g not in groups_present or not groups_present.difference((g,)):
+            # No pixels in this group, or no opposing mask to obscure them.
+            exclusive[g] = masks[g]
+        else:
+            others = np.logical_or.reduce([masks[k] for k in GROUPS if k != g])
+            forbidden = cv2.dilate(others.astype(np.uint8), kernel).astype(bool)
+            exclusive[g] = masks[g] & ~forbidden
     exclusive['master'] = union & ~(exclusive['external'] | exclusive['internal'])
     if any("authorized" in face for face in faces):
         from .face_display import annotate

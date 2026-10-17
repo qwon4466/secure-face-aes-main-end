@@ -20,13 +20,53 @@ def product(path):
         return 'Unknown'
 
 
+def interface_name(path):
+    """Return the USB interface role (for example RealSense ``RGB``/``Depth``)."""
+    node = Path(path).resolve().name
+    try:
+        return Path('/sys/class/video4linux', node, 'device', 'interface').read_text().strip()
+    except OSError:
+        return ''
+
+
+def stream_index(path):
+    """UVC video index; RealSense index 0 is image data and index 1 metadata."""
+    node = Path(path).resolve().name
+    try:
+        return int(Path('/sys/class/video4linux', node, 'index').read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def camera_role(path):
+    """Classify sensor role without relying on the unstable /dev/video number."""
+    name = product(path)
+    interface = interface_name(path)
+    combined = (name + ' ' + interface).lower()
+    if 'realsense' in combined:
+        if 'rgb' in interface.lower() or 'color' in interface.lower():
+            return 'realsense-rgb' if stream_index(path) == 0 else 'realsense-metadata'
+        if interface:
+            return 'realsense-non-rgb'
+        # Fail closed when a RealSense interface cannot be identified.  A
+        # Depth/IR node converted by OpenCV can still look like a BGR frame.
+        return 'realsense-unknown'
+    return 'color'
+
+
+def _fourcc(value):
+    value = int(value)
+    return ''.join(chr((value >> (8*i)) & 255) for i in range(4)).rstrip('\x00')
+
+
 def candidates():
     def priority(path):
-        name = (product(path) + ' ' + path).lower()
-        return (0 if 'realsense' in name and ('rgb' in name or 'color' in name) else (1 if 'realsense' in name else 2),
+        role = camera_role(path)
+        stable = 0 if '/by-path/' in path else (1 if '/by-id/' in path else 2)
+        return (0 if role == 'realsense-rgb' else (1 if role == 'color' else 2), stable,
                 int(re.search(r'video(\d+)$', str(Path(path).resolve())).group(1))
                 if re.search(r'video(\d+)$', str(Path(path).resolve())) else 9999)
-    links = sorted(glob.glob('/dev/v4l/by-id/*'), key=priority)
+    links = sorted(glob.glob('/dev/v4l/by-path/*') + glob.glob('/dev/v4l/by-id/*'), key=priority)
     nodes = sorted(glob.glob('/dev/video*'), key=priority)
     # Stable aliases are retained even when prioritizing a RealSense color node.
     paths = []; seen = set()
@@ -48,6 +88,9 @@ class CameraManager:
         self.failures = []
         self.owned = False
         self.generation = 0
+        self.required_role = ('realsense-rgb'
+                              if bool(getattr(config, 'REQUIRE_REALSENSE_RGB', False))
+                              else None)
 
     def open(self):
         if self.cap is not None:
@@ -87,13 +130,35 @@ class CameraManager:
             if not Path(path).exists():
                 raise ValueError('장치가 존재하지 않습니다')
             name = product(path)
+            interface = interface_name(path)
+            role = camera_role(path)
+            if role in ('realsense-non-rgb', 'realsense-unknown', 'realsense-metadata'):
+                raise ValueError(f'RealSense RGB 노드가 아닙니다 (interface={interface or "unknown"})')
+            if self.required_role is not None and role != self.required_role:
+                raise ValueError(f'필수 카메라 역할 불일치: {role} != {self.required_role}')
             cap = cv2.VideoCapture(str(path), cv2.CAP_V4L2)
             if not cap.isOpened():
                 raise ValueError('V4L2 열기 실패 (권한/점유/영상 기능 확인)')
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            # Logitech development profile only; other devices keep their native mode.
-            if not native and ('046d' in (name + path).lower() or 'logitech' in name.lower()):
+            profile = 'device-native'
+            if not native and role == 'realsense-rgb':
                 requested = True
+                profile = 'realsense-rgb-yuyv'
+                width = int(getattr(self.config, 'CAMERA_WIDTH', 640))
+                height = int(getattr(self.config, 'CAMERA_HEIGHT', 480))
+                fps = float(getattr(self.config, 'CAMERA_FPS', 30))
+                settings = ((cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV')),
+                            (cv2.CAP_PROP_FRAME_WIDTH, width),
+                            (cv2.CAP_PROP_FRAME_HEIGHT, height),
+                            (cv2.CAP_PROP_FPS, fps))
+                for prop, value in settings:
+                    if not cap.set(prop, value):
+                        raise ValueError('RealSense RGB YUYV 프로파일 설정 실패')
+                print(f'[Camera] RealSense RGB 요청: {path} YUYV {width}x{height} @{fps:g}fps',flush=True)
+            # Logitech development profile only; other devices keep their native mode.
+            elif not native and ('046d' in (name + path).lower() or 'logitech' in name.lower()):
+                requested = True
+                profile = 'logitech-request'
                 settings = ((cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG')),
                             (cv2.CAP_PROP_FRAME_WIDTH, 640), (cv2.CAP_PROP_FRAME_HEIGHT, 480),
                             (cv2.CAP_PROP_FPS, 30))
@@ -116,11 +181,20 @@ class CameraManager:
                 color |= bool(np.mean(np.max(sample, axis=2)-np.min(sample, axis=2)) > 2 and np.mean(sample.std(axis=(0, 1))) > 2)
             if not color:
                 raise ValueError('단색/깊이 영상 또는 컬러 확인 불가 (조명/장면 확인)')
+            pixel_format = _fourcc(cap.get(cv2.CAP_PROP_FOURCC))
+            if role == 'realsense-rgb' and pixel_format != 'YUYV':
+                raise ValueError(f'RealSense RGB 포맷 불일치: {pixel_format or "unknown"} != YUYV')
             self.cap = cap
             self.selected = {'device':str(path), 'product':name, 'width':int(frame.shape[1]),
                              'height':int(frame.shape[0]), 'fps':float(cap.get(cv2.CAP_PROP_FPS)),
-                             'fourcc': ''.join(chr((int(cap.get(cv2.CAP_PROP_FOURCC)) >> (8*i)) & 255) for i in range(4)),
-                             'profile': 'logitech-request' if requested else 'device-native'}
+                             'fourcc':pixel_format, 'pixel_format':pixel_format,
+                             'profile':(profile if not native else
+                                        ('realsense-rgb-native-verified'
+                                         if role == 'realsense-rgb' else 'device-native')),
+                             'role':role, 'interface':interface,
+                             'node':str(Path(path).resolve()), 'generation':self.generation+1}
+            if role == 'realsense-rgb':
+                self.required_role = role
             SELECTED.clear(); SELECTED.update(self.selected)
             if self.config is not None:
                 self.config.CAMERA_SELECTED_DEVICE = str(path)
@@ -131,7 +205,9 @@ class CameraManager:
             if cap is not None:
                 cap.release()
             if requested:
-                print(f'[Camera] {path}: 요청 모드 실패 ({exc}) → 장치 기본 형식/해상도로 재시도', flush=True)
+                retry=('RealSense 기본 모드를 같은 RGB 규칙으로 재검증'
+                       if role == 'realsense-rgb' else '장치 기본 형식/해상도로 재시도')
+                print(f'[Camera] {path}: 요청 모드 실패 ({exc}) → {retry}', flush=True)
                 return self._probe(path, native=True)
             message = f'{path} ({product(path)}): {exc}' 
             self.failures.append(message)

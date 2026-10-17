@@ -1,8 +1,10 @@
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 import resource
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -14,8 +16,9 @@ from .selective_recognition import Classifier, synthetic_frame
 from .selective_crypto import MAX_FRAMES, MAX_RAW, MAX_CHUNK_RAW, MAX_PIXELS, RestoreError, canonical, private_dir, save_chunk, write_new
 
 class Recorder:
-    """Synchronous backpressure, no unbounded queue. At most one chunk in memory."""
-    def __init__(self, output, keys, fps=10, chunk_frames=8, on_frame=None, on_chunk=None, duration=None):
+    """Bounded recording with at most one background chunk save."""
+    def __init__(self, output, keys, fps=10, chunk_frames=8, on_frame=None,
+                 on_chunk=None, duration=None, background_flush=False):
         if not 1<=chunk_frames<=MAX_FRAMES or not 0<fps<=120:
             raise RestoreError('청크 프레임 / FPS 범위 오류')
         if duration is not None and (not isinstance(duration,(int,float)) or not 0<duration<=86400):
@@ -27,8 +30,13 @@ class Recorder:
         self.chunks=[]; self.latencies=[]; self.frames_total=0; self.drops=0; self.peak_buffer=0
         self.buffer_cipher=AESGCM(AESGCM.generate_key(bit_length=256));self.buffer_bytes=0
         self.last_capture=-1; self.shape=None; self.started=time.perf_counter()
+        self.background_flush=background_flush;self._pending=None;self._closed=False
+        self._state_lock=threading.Lock()
+        self._executor=(ThreadPoolExecutor(max_workers=1,thread_name_prefix='chunk-save')
+                        if background_flush else None)
 
     def add(self, frame, faces, capture_id, timestamp_ms):
+        self._collect_pending()
         if capture_id<=self.last_capture or frame.nbytes>MAX_RAW or frame.shape[0]*frame.shape[1]>MAX_PIXELS:
             raise RestoreError('촬영 ID / 프레임 상한 오류')
         if self.duration and self.frames and time.monotonic()-self.chunk_start>=self.duration:
@@ -53,30 +61,53 @@ class Recorder:
         if not self.duration and len(self.frames)>=self.limit:
             self.flush()
 
-    def flush(self,completed=False):
-        if not self.frames:
+    def _collect_pending(self,wait=False):
+        if self._pending is None or not (wait or self._pending.done()):
             return
-        if self.duration and not completed:return
-        t=time.perf_counter()
-        elapsed=self.duration if self.duration else len(self.frames)/self.fps
-        actual_fps=len(self.frames)/elapsed
-        dropped=max(0,round(self.fps*elapsed)-len(self.frames)) if self.duration else 0
-        final_path=self.output/self.chunk_wall.strftime('%Y-%m-%d/%H/%H-%M-%S') if self.duration else None
-        originals=[np.frombuffer(self.buffer_cipher.decrypt(nonce,data,None),dtype=np.uint8).reshape(self.shape) for nonce,data in self.frames]
+        future=self._pending;self._pending=None
+        future.result()
+
+    def _save_payload(self,payload):
+        frames,faces,timing,shape,cipher,chunk_wall,elapsed,final_path=payload
+        t=time.perf_counter();actual_fps=len(frames)/elapsed
+        dropped=max(0,round(self.fps*elapsed)-len(frames)) if self.duration else 0
+        originals=[np.frombuffer(cipher.decrypt(nonce,data,None),dtype=np.uint8).reshape(shape)
+                   for nonce,data in frames]
         try:
-            chunk=save_chunk(self.output,originals,self.faces,self.timing,self.keys,self.session,actual_fps,final_path=final_path,duration=elapsed,drops=dropped,started_at=self.chunk_wall if self.duration else None,ended_at=(self.chunk_wall+timedelta(seconds=elapsed)) if self.duration else None)
+            chunk=save_chunk(self.output,originals,faces,timing,self.keys,self.session,
+                             actual_fps,final_path=final_path,duration=elapsed,drops=dropped,
+                             started_at=chunk_wall if self.duration else None,
+                             ended_at=(chunk_wall+timedelta(seconds=elapsed)) if self.duration else None)
         except Exception as exc:
             print(f'[CHUNK][ERROR] 저장 실패 | 임시경로={final_path} | 원인={exc}',flush=True)
             raise
         if self.duration:
             total=sum(f.stat().st_size for f in chunk.iterdir() if f.is_file())/1048576
-            end=datetime.now(ZoneInfo('Asia/Seoul'))
-            capture_end=self.chunk_wall+timedelta(seconds=elapsed)
-            print(f'[CHUNK] 저장 완료 | 시작={self.chunk_wall:%Y-%m-%d %H:%M:%S} KST | 촬영종료={capture_end:%Y-%m-%d %H:%M:%S} KST | 저장완료={end:%Y-%m-%d %H:%M:%S} KST | 경로={chunk.relative_to(self.output)} | 목표={self.duration:g}초 | 길이={elapsed:.2f}초 | 프레임={len(originals)} | FPS={actual_fps:.2f} | 드롭={dropped} | 크기={total:.1f}MB',flush=True)
-        self.latencies.append(time.perf_counter()-t); self.chunks.append(chunk.name)
-        self.frames.clear(); self.faces.clear(); self.timing.clear();self.buffer_bytes=0;self.chunk_start=None
-        if self.on_chunk:
-            self.on_chunk(chunk)
+            end=datetime.now(ZoneInfo('Asia/Seoul'));capture_end=chunk_wall+timedelta(seconds=elapsed)
+            print(f'[CHUNK] 저장 완료 | 시작={chunk_wall:%Y-%m-%d %H:%M:%S} KST | 촬영종료={capture_end:%Y-%m-%d %H:%M:%S} KST | 저장완료={end:%Y-%m-%d %H:%M:%S} KST | 경로={chunk.relative_to(self.output)} | 목표={self.duration:g}초 | 길이={elapsed:.2f}초 | 프레임={len(originals)} | FPS={actual_fps:.2f} | 드롭={dropped} | 크기={total:.1f}MB',flush=True)
+        with self._state_lock:
+            self.latencies.append(time.perf_counter()-t);self.chunks.append(chunk.name)
+        if self.on_chunk:self.on_chunk(chunk)
+
+    def flush(self,completed=False):
+        if not self.frames:
+            return
+        if self.duration and not completed:return
+        self._collect_pending()
+        # Hard bound: never queue a second save behind an active one.  Waiting
+        # can occur only if a save lasts longer than the following full chunk.
+        if self.background_flush and self._pending is not None:
+            self._collect_pending(wait=True)
+        elapsed=self.duration if self.duration else len(self.frames)/self.fps
+        final_path=self.output/self.chunk_wall.strftime('%Y-%m-%d/%H/%H-%M-%S') if self.duration else None
+        payload=(self.frames,self.faces,self.timing,self.shape,self.buffer_cipher,
+                 self.chunk_wall,elapsed,final_path)
+        self.frames=[];self.faces=[];self.timing=[];self.buffer_bytes=0;self.chunk_start=None
+        self.buffer_cipher=AESGCM(AESGCM.generate_key(bit_length=256))
+        if self.background_flush:
+            self._pending=self._executor.submit(self._save_payload,payload)
+        else:
+            self._save_payload(payload)
 
     def progress(self):
         if not self.duration or self.chunk_start is None:
@@ -88,17 +119,25 @@ class Recorder:
                 'drops':max(0,round(self.fps*elapsed)-len(self.frames))}
 
     def stats(self):
+        self._collect_pending()
         elapsed=time.perf_counter()-self.started
+        with self._state_lock:
+            latencies=self.latencies.copy();chunks=self.chunks.copy()
         return {'session':self.session,'resolution':list(self.shape[:2][::-1]) if self.shape else None,
                 'frames':self.frames_total,'processing_fps':self.frames_total/max(elapsed,1e-9),
                 'elapsed_seconds':elapsed,'peak_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
-                'chunk_write_seconds':self.latencies.copy(),'drops':self.drops,
+                'chunk_write_seconds':latencies,'drops':self.drops,
                 'device_drops':'unknown','queue_capacity':0,'buffer_limit_frames':self.limit,
-                'peak_buffer_frames':self.peak_buffer,'chunks':self.chunks.copy()}
+                'peak_buffer_frames':self.peak_buffer,'chunks':chunks,
+                'chunk_save_in_progress':self._pending is not None}
 
     def finish(self):
         if not self.duration:self.flush()
         else:self.abort()  # a short final segment is never published as a completed chunk
+        self._collect_pending(wait=True)
+        if self._executor is not None:
+            self._executor.shutdown(wait=True);self._executor=None
+        self._closed=True
         report=self.stats()
         if not self.duration:write_new(self.output/(self.session+'-stats.json'),canonical(report))
         return report
@@ -106,6 +145,16 @@ class Recorder:
     def abort(self):
         # Discard uncommitted originals without ever persisting them.
         self.frames.clear(); self.faces.clear(); self.timing.clear();self.buffer_bytes=0
+
+    def close(self):
+        """Discard an incomplete chunk and finish any committed background save."""
+        if self._closed:return
+        self.abort()
+        try:self._collect_pending(wait=True)
+        except Exception:pass
+        if self._executor is not None:
+            self._executor.shutdown(wait=True);self._executor=None
+        self._closed=True
 
 
 def process(source, adapter, output, keys, max_frames=80, fps=10, chunk_frames=8,

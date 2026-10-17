@@ -22,7 +22,7 @@
       z-index: 100;
       box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     }
-    .topbar-logo { font-size: 17px; font-weight: 700; color: #3B82F6; letter-spacing: -0.3px; }
+    .topbar-logo { font-size: 17px; font-weight: 700; color: #3B82F6; letter-spacing: -0.3px; display:flex; align-items:center; gap:6px; }
     .topbar-logo span { color: #1E293B; font-weight: 400; }
     .topbar-nav a {
       text-decoration: none;
@@ -49,7 +49,12 @@
       min-width: 150px;
       box-shadow: 0 1px 2px rgba(0,0,0,0.04);
     }
-    .stat-icon { font-size: 22px; line-height: 1; }
+    .ui-icon { width: 1em; height: 1em; display:inline-block; vertical-align:-0.15em; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+    .logo-icon { width:20px; height:20px; }
+    .stat-icon { font-size: 24px; line-height: 1; display:flex; }
+    .stat-icon.camera { color:#3B82F6; }
+    .stat-icon.employee { color:#16A34A; }
+    .stat-icon.unknown, .stat-icon.recording { color:#DC2626; }
     .stat-label { font-size: 11px; color: #64748B; font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase; }
     .stat-value { font-size: 22px; font-weight: 700; color: #1E293B; line-height: 1.2; margin-top: 1px; }
     .badge-rec {
@@ -148,7 +153,7 @@
       background: #F8FAFC;
       color: #94A3B8;
     }
-    .cam-placeholder .ph-icon { font-size: 32px; opacity: 0.4; }
+    .cam-placeholder .ph-icon { font-size: 32px; opacity: 0.55; display:flex; }
     .cam-placeholder .ph-text { font-size: 13px; font-weight: 500; }
 
     /* ── 경고 토스트 ── */
@@ -172,47 +177,53 @@
   </style>
 </head>
 <body>
+<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+  <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v2"/></symbol>
+  <symbol id="icon-camera" viewBox="0 0 24 24"><path d="M4 7h4l1.5-2h5L16 7h4v12H4z"/><circle cx="12" cy="13" r="4"/></symbol>
+  <symbol id="icon-user" viewBox="0 0 24 24"><circle cx="10" cy="8" r="3"/><path d="M4 19c.5-4 2.5-6 6-6 2 0 3.6.7 4.6 2"/><path d="m16 18 2 2 4-5"/></symbol>
+  <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19z"/><path d="M12 9v5"/><path d="M12 17h.01"/></symbol>
+  <symbol id="icon-record" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="12" cy="12" r="4"/></symbol>
+</svg>
 <div id="selectiveError" role="status" style="padding:10px;color:#b91c1c"></div>
-<script>setInterval(async()=>{try{const s=await(await fetch("/api/stats")).json();document.getElementById("selectiveError").textContent=s.error?"선택 녹화 오류: "+s.error:""}catch(e){}},2000)</script>
 
 <!-- 상단 바 -->
 <div class="topbar">
-  <div class="topbar-logo">🔒 SecureFace<span>-RX</span></div>
+  <div class="topbar-logo"><svg class="ui-icon logo-icon" aria-hidden="true"><use href="#icon-lock"></use></svg>SecureFace<span>-RX</span></div>
   <nav class="topbar-nav">
     <a href="/" class="active">실시간 모니터링</a>
     <a href="/assets">보호 자산</a>
-    <a href="/employees">🔐 관리자</a>
+    <a href="/employees"><svg class="ui-icon" aria-hidden="true"><use href="#icon-lock"></use></svg> 관리자</a>
   </nav>
 </div>
 
 <!-- 통계 바 -->
 <div class="stats-bar">
   <div class="stat-card">
-    <div class="stat-icon">📷</div>
+    <div class="stat-icon camera"><svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg></div>
     <div>
       <div class="stat-label">활성 카메라</div>
-      <div class="stat-value">1</div>
+      <div class="stat-value" id="stat-camera">0</div>
     </div>
   </div>
   <div class="stat-card">
-    <div class="stat-icon">🟢</div>
+    <div class="stat-icon employee"><svg class="ui-icon" aria-hidden="true"><use href="#icon-user"></use></svg></div>
     <div>
       <div class="stat-label">인식된 사원</div>
       <div class="stat-value" id="stat-emp">0</div>
     </div>
   </div>
   <div class="stat-card">
-    <div class="stat-icon">🔴</div>
+    <div class="stat-icon unknown"><svg class="ui-icon" aria-hidden="true"><use href="#icon-alert"></use></svg></div>
     <div>
       <div class="stat-label">외부인 경고</div>
       <div class="stat-value" id="stat-unk">0</div>
     </div>
   </div>
   <div class="stat-card">
-    <div class="stat-icon">⏺</div>
+    <div class="stat-icon recording"><svg class="ui-icon" aria-hidden="true"><use href="#icon-record"></use></svg></div>
     <div>
       <div class="stat-label">녹화 상태</div>
-      <div><span class="badge-rec">REC</span></div>
+      <div><span class="badge-rec" id="recordingBadge" style="display:none">REC</span></div>
     </div>
   </div>
 </div>
@@ -233,25 +244,29 @@
   <div class="cam-tile live">
     <img id="streamImg" alt="CAM-01" style="width:100%;height:100%;object-fit:cover;display:block;">
     <div class="cam-label">CAM-01</div>
-    <div class="cam-live-badge">LIVE</div>
+    <div class="cam-live-badge" id="cameraLiveBadge" style="display:none">LIVE</div>
+    <div class="cam-placeholder" id="cameraStatus" style="position:absolute;inset:0;z-index:2">
+      <div class="ph-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg></div>
+      <div class="ph-text">카메라 준비 중</div>
+    </div>
   </div>
 
   <!-- CAM-02~04: 플레이스홀더 -->
   <div class="cam-tile">
     <div class="cam-placeholder">
-      <div class="ph-icon">📷</div>
+      <div class="ph-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg></div>
       <div class="ph-text">CAM-02 · 미연결</div>
     </div>
   </div>
   <div class="cam-tile">
     <div class="cam-placeholder">
-      <div class="ph-icon">📷</div>
+      <div class="ph-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg></div>
       <div class="ph-text">CAM-03 · 미연결</div>
     </div>
   </div>
   <div class="cam-tile">
     <div class="cam-placeholder">
-      <div class="ph-icon">📷</div>
+      <div class="ph-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg></div>
       <div class="ph-text">CAM-04 · 미연결</div>
     </div>
   </div>
@@ -263,15 +278,33 @@
 <script>
   // ── 스냅샷 폴링 (~10fps) ──
   const streamImg = document.getElementById('streamImg');
+  const FRAME_REQUEST_TIMEOUT_MS = 2000;
   let frameRequestInFlight = false;
+  let frameRequestToken = 0;
   function refreshFrame() {
     // 이전 요청이 끝나기 전에 새 요청을 겹쳐 보내지 않는다.
     // 응답 순서가 뒤집혀 과거 프레임이 최신 화면을 덮는 현상을 방지한다.
     if (frameRequestInFlight) return;
     frameRequestInFlight = true;
+    const token = ++frameRequestToken;
     const next = new Image();
-    const done = () => { frameRequestInFlight = false; };
-    next.onload = () => { streamImg.src = next.src; done(); };
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (token === frameRequestToken) frameRequestInFlight = false;
+    };
+    const timer = setTimeout(() => {
+      next.onload = null;
+      next.onerror = null;
+      next.src = '';
+      done();
+    }, FRAME_REQUEST_TIMEOUT_MS);
+    next.onload = () => {
+      if (token === frameRequestToken) streamImg.src = next.src;
+      done();
+    };
     next.onerror = done;
     next.src = '/snapshot/cam_0?t=' + Date.now();
   }
@@ -280,19 +313,37 @@
 
   // ── 통계 폴링 ──
   let prevUnk = 0;
+  let statsInFlight = false;
   async function updateStats() {
+    if (statsInFlight) return;
+    statsInFlight = true;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
     try {
-      const d = await fetch('/api/stats').then(r => r.json());
+      const d = await fetch('/api/stats', { signal: controller.signal }).then(r => r.json());
+      document.getElementById('selectiveError').textContent = d.error ? '선택 녹화 오류: ' + d.error : '';
+      const ready = d.camera_ready === true;
+      document.getElementById('stat-camera').textContent = ready ? '1' : '0';
+      document.getElementById('cameraLiveBadge').style.display = ready ? '' : 'none';
+      document.getElementById('recordingBadge').style.display = d.recording ? '' : 'none';
+      const cameraStatus = document.getElementById('cameraStatus');
+      cameraStatus.style.display = ready ? 'none' : 'flex';
+      cameraStatus.querySelector('.ph-text').textContent = d.error ||
+        (d.camera_state === 'stale' ? '새 프레임 수신 지연' :
+         d.camera_state === 'stopped' ? '카메라 중지됨' : '카메라 준비 중');
       document.getElementById('stat-emp').textContent = d.employee_count ?? 0;
       // 외부인 경고: 현재 프레임의 비허가자 수 (같은 얼굴 중복 누적 없음)
       document.getElementById('stat-unk').textContent = d.unknown_alerts ?? 0;
 
       // 외부인 새로 등장 시 경고 토스트 (현재 프레임 기준)
       if ((d.unknown_count ?? 0) > prevUnk) {
-        showToast(`⚠️ 외부인 ${d.unknown_count}명 감지됨`, 'warn');
+        showToast(`외부인 ${d.unknown_count}명 감지됨`, 'warn');
       }
       prevUnk = d.unknown_count ?? 0;
-    } catch {}
+    } catch {} finally {
+      clearTimeout(timer);
+      statsInFlight = false;
+    }
   }
 
   // ── GPU 서버 연결 상태 배지 ──
@@ -303,8 +354,8 @@
       if (!el) return;
       if (!g.configured) { el.innerHTML = ''; return; }
       el.innerHTML = g.connected
-        ? '<span style="padding:3px 10px; border-radius:999px; background:#dcfce7; color:#166534;">🟢 GPU 서버 연결됨</span>'
-        : '<span style="padding:3px 10px; border-radius:999px; background:#fee2e2; color:#991b1b;">🔴 GPU 서버 끊김</span>';
+        ? '<span style="padding:3px 10px; border-radius:999px; background:#dcfce7; color:#166534;">GPU 서버 연결됨</span>'
+        : '<span style="padding:3px 10px; border-radius:999px; background:#fee2e2; color:#991b1b;">GPU 서버 끊김</span>';
     } catch {}
   }
   pollGpu();
