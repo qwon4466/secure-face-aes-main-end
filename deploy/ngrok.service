@@ -1,0 +1,21 @@
+[Unit]
+Description=ngrok tunnel for SecureFace-RX
+Requires=secure-face.service
+After=secure-face.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hkl9292
+Group=hkl9292
+WorkingDirectory=/home/hkl9292/jude/secure-face-gpu-aes--main
+ExecStartPre=/home/hkl9292/jude/secure-face-gpu-aes--main/deploy/wait-for-secure-face.sh
+ExecStart=/usr/local/bin/ngrok http 8000 --url https://appointee-dreary-unisexual.ngrok-free.dev
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

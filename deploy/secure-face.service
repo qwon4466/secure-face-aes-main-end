@@ -1,0 +1,23 @@
+[Unit]
+Description=SecureFace-RX CCTV server
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/home/hkl9292/jude/secure-face-gpu-aes--main
+
+[Service]
+Type=simple
+User=hkl9292
+Group=hkl9292
+SupplementaryGroups=video render
+WorkingDirectory=/home/hkl9292/jude/secure-face-gpu-aes--main
+ExecStart=/home/hkl9292/jude/secure-face-gpu-aes--main/hk_env/bin/python /home/hkl9292/jude/secure-face-gpu-aes--main/main.py
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

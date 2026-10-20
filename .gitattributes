@@ -1,3 +1,2 @@
-# 리눅스(라즈베리파이)에서 실행되는 스크립트·서비스 템플릿은 항상 LF 줄바꿈
-*.sh          text eol=lf
-*.service.in  text eol=lf
+# 리눅스(라즈베리파이)에서 실행되는 스크립트는 항상 LF 줄바꿈
+*.sh  text eol=lf
