@@ -17,7 +17,6 @@ run=ROOT/'tests/runtime'/('main-'+uuid.uuid4().hex);run.mkdir(parents=True,mode=
 with socket.socket() as check:
  check.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);check.bind(('127.0.0.1',8000))
 env=dict(os.environ,PYTHONDONTWRITEBYTECODE='1',SRX_TEST_MODE='synthetic',SRX_TEST_FRAMES='24',SRX_DATA_ROOT=str(run),SRX_PORT='8000',MPLCONFIGDIR=str(run/'mpl'),XDG_CACHE_HOME=str(run/'cache'))
-static=run/'legacy-static';static.mkdir();(static/'regression.txt').write_text('static-ok')
 legacy=run/'legacy-fixtures/2026-09-15/00/chunk_0001';legacy.mkdir(parents=True)
 raw=legacy/'synthetic.bin';raw.write_bytes(b''.join(synthetic_frame(i).tobytes() for i in range(4)))
 password=secrets.token_hex(20);encrypt_file(str(raw),str(legacy/'chunk_0001.enc'),password)
@@ -34,7 +33,7 @@ try:
   assert 'href="/selective/"' not in r.text
   assert c.get('/selective/').status_code==401
   assert c.get('/selective/api/chunks').status_code==401
-  assert c.get('/recordings/regression.txt').text=='static-ok'
+  assert c.get('/recordings/regression.txt').status_code==404  # 로그인 없는 정적 파일 경로는 제거됨
   assert c.get('/snapshot/raw').status_code==401
   assert c.get('/decryption_page').status_code==302
   login=c.post('/api/admin/login',json={'id':config.ADMIN_ID,'password':config.ADMIN_PASSWORD});login.raise_for_status()

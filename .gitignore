@@ -11,3 +11,7 @@
 /security_system.db
 # Private selective recordings, keys and generated test artifacts
 tests/runtime/
+
+# Backups and session/scratch files (e.g. ':memory:.ses' breaks Windows checkouts)
+*.backup
+*.ses

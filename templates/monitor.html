@@ -232,7 +232,6 @@
 <div class="grid-header">
   <div class="grid-header-title">CCTV 스트림</div>
   <div class="grid-controls">
-    <span id="gpuBadge" style="font-size:13px; margin-right:12px;"></span>
     <button class="grid-btn active" onclick="setGrid(2, this)">2×2</button>
     <button class="grid-btn" onclick="setGrid(1, this)">단독</button>
   </div>
@@ -346,20 +345,6 @@
     }
   }
 
-  // ── GPU 서버 연결 상태 배지 ──
-  async function pollGpu() {
-    try {
-      const g = await fetch('/api/gpu_status').then(r => r.json());
-      const el = document.getElementById('gpuBadge');
-      if (!el) return;
-      if (!g.configured) { el.innerHTML = ''; return; }
-      el.innerHTML = g.connected
-        ? '<span style="padding:3px 10px; border-radius:999px; background:#dcfce7; color:#166534;">GPU 서버 연결됨</span>'
-        : '<span style="padding:3px 10px; border-radius:999px; background:#fee2e2; color:#991b1b;">GPU 서버 끊김</span>';
-    } catch {}
-  }
-  pollGpu();
-  setInterval(pollGpu, 5000);
   setInterval(updateStats, 1000);
   updateStats();
 
