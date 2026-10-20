@@ -84,6 +84,10 @@ FACE_AUTH_CONFIRM_MATCHES = 2
 FACE_AUTH_CONFIRM_WINDOW = 3
 FACE_AUTH_REVOKE_MISMATCHES = 5
 FACE_AUTH_HOLD_SECONDS = 0.8
+# 비허가자 감지 알림: 이 시간 동안 계속 비허가일 때만 알림(등록자 인식 확정 전 오탐 방지),
+# 같은 자리에서 이 시간 안에 다시 잡힌 얼굴은 같은 사람으로 보고 다시 알리지 않음
+DETECT_ALERT_CONFIRM_SECONDS = 1.0
+DETECT_ALERT_REARM_SECONDS = 5.0
 SELECTIVE_SOURCE = os.environ.get("SRX_VIDEO_SOURCE", "")  # Empty: CAMERA_DEVICE; otherwise a local video file
 SELECTIVE_MODEL_DIR = os.path.expanduser("~/.insightface/models/buffalo_s")
 SELECTIVE_DETECTOR_PATH = ""  # Optional explicit SCRFD ONNX file

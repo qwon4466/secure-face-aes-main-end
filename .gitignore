@@ -15,3 +15,6 @@ tests/runtime/
 # Backups and session/scratch files (e.g. ':memory:.ses' breaks Windows checkouts)
 *.backup
 *.ses
+
+# 감사 기록(복원·비허가자 감지)은 라즈베리파이에서 계속 쌓이므로 저장소에서 추적하지 않음
+logs/

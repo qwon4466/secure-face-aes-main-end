@@ -5,7 +5,7 @@
 - 비허가자 감지 이벤트(detect_events.jsonl): 미등록 인원 감지 시 기록.
 
 프라이버시 시스템의 책임성(accountability)을 위해, 익명화 해제(복원)는 반드시
-기록으로 남긴다. main.py(복원)와 camera_stream.py(감지)가 함께 사용한다.
+기록으로 남긴다. main.py가 복원 시와 카메라의 비허가자 감지 이벤트 시 사용한다.
 """
 import json
 import os
@@ -16,6 +16,14 @@ _LOG_DIR = "logs"
 _RESTORE_LOG = os.path.join(_LOG_DIR, "restore_audit.jsonl")
 _DETECT_LOG = os.path.join(_LOG_DIR, "detect_events.jsonl")
 _lock = threading.Lock()
+
+
+def set_log_dir(path):
+    """기록 위치 변경 (테스트 실행이 운영 기록에 섞이지 않도록)."""
+    global _LOG_DIR, _RESTORE_LOG, _DETECT_LOG
+    _LOG_DIR = str(path)
+    _RESTORE_LOG = os.path.join(_LOG_DIR, "restore_audit.jsonl")
+    _DETECT_LOG = os.path.join(_LOG_DIR, "detect_events.jsonl")
 
 
 def _append(path: str, entry: dict):
@@ -37,10 +45,12 @@ def log_restore(chunk_id: str, who: str, ip: str, success: bool, mode: str = "gp
     })
 
 
-def log_detection(name: str, group: str, sim: float):
-    """비허가자(미등록) 감지 기록."""
+def log_detection(name: str, group: str, sim, track=None):
+    """비허가자(미등록) 감지 기록. sim은 인식 실패 시 None."""
     _append(_DETECT_LOG, {
-        "name": name, "group": group, "sim": round(float(sim), 3),
+        "name": name, "group": group,
+        "sim": None if sim is None else round(float(sim), 3),
+        "track": track,
     })
 
 

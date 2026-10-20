@@ -68,6 +68,11 @@ if os.environ.get("SRX_TEST_MODE") in ("synthetic", "file", "camera"):
     IMAGE_DIR = str(camera.root / "test-registered-faces")
 c.RAW_DATA_DIR = camera.root
 camera.gallery_path = DB_PATH
+if not camera.operational:
+    # 테스트 실행(SRX_TEST_MODE / SRX_DATA_ROOT)의 감사 기록은 그 데이터 폴더에만 남긴다.
+    event_log.set_log_dir(camera.root / "logs")
+camera.on_alert = lambda face: event_log.log_detection(
+    "Unknown", "비허가", face.get("similarity"), track=face.get("track_id"))
 
 # AES 원본 복원은 전용 worker에서 실행한다. 단일 worker로 CPU 경쟁을
 # 제한하면서도 FastAPI event loop와 HTTP 요청을 점유하지 않는다.
