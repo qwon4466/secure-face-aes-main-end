@@ -1,0 +1,23 @@
+# 템플릿 파일입니다. 직접 복사하지 말고 deploy/install.sh로 설치하세요.
+# NGROK_URL 환경변수를 주고 설치할 때만 만들어집니다 (주소는 저장소에 남기지 않음).
+[Unit]
+Description=ngrok tunnel for SecureFace-RX
+Requires=secure-face.service
+After=secure-face.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@APP_DIR@
+ExecStartPre=@APP_DIR@/deploy/wait-for-secure-face.sh
+ExecStart=@NGROK_BIN@ http 8000 --url @NGROK_URL@
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
