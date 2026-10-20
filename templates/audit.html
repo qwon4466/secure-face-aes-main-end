@@ -102,7 +102,7 @@
           <tr>
             <td>${fmt(e.time)}</td>
             <td><span class="badge b-warn">${esc(e.group || '비허가')}</span></td>
-            <td>${esc(e.sim)}</td>
+            <td>${e.sim == null ? '-' : esc(e.sim)}</td>
           </tr>`).join('') : '<tr><td colspan="3" class="empty">감지 이력이 없습니다.</td></tr>';
       } catch { document.getElementById('detectBody').innerHTML = '<tr><td colspan="3" class="empty">불러오기 실패</td></tr>'; }
     }

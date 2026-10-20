@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 import traceback
+from collections import deque
 import cv2
 import numpy as np
 from .selective_crypto import ROOT, RestoreError, generate_keys, keyset, private_dir, protect
@@ -14,6 +15,7 @@ from .selective_recognition import CPUAdapter, Classifier, Policy, SyntheticAdap
 from .selective_recording import Recorder
 from .camera_manager import CameraManager, SELECTED
 from .face_display import korean_font
+from .detection_alerts import AlertTracker
 
 DB_PATH='security_system.db'
 def _adapt_array(arr):
@@ -46,9 +48,27 @@ class MainCamera:
         self.lock=threading.RLock();self.thread=None;self.stop_event=threading.Event()
         self.preview=None;self.raw=None;self.detector=None;self.recognizer=None;self.adapter=None
         self.error=None;self.faces=[];self.metrics={};self.running=False;self.recorder=None
+        # 비허가자 감지 이벤트: 모니터 팝업(alert_seq/recent_alerts)과 감지 이력(on_alert)에 사용
+        self.alerts=self._alert_tracker();self.alert_seq=0;self.alert_events=deque(maxlen=20);self.on_alert=None
         self.model_backend='initializing'
         self.last_preview_at=None;self.frame_sequence=0
         self.last_read_ms=0.0;self.last_process_ms=0.0
+
+    def _alert_tracker(self):
+        return AlertTracker(getattr(self.config,'DETECT_ALERT_CONFIRM_SECONDS',1.0),
+                            getattr(self.config,'DETECT_ALERT_REARM_SECONDS',5.0))
+
+    def _record_alerts(self, alerts, faces):
+        stamp=time.strftime('%Y-%m-%dT%H:%M:%S')
+        in_view=sum(not f.get('authorized',False) for f in faces)
+        with self.lock:
+            for _ in alerts:
+                self.alert_seq+=1
+                self.alert_events.append({'id':self.alert_seq,'time':stamp,'in_view':in_view})
+        if self.on_alert:
+            for face in alerts:
+                try:self.on_alert(face)
+                except Exception as exc:print('[Alert] 감지 이력 기록 실패:',exc,flush=True)
 
     def reload_db(self):
         if self.adapter is not None and not self.test:
@@ -255,6 +275,7 @@ class MainCamera:
                         else:self.recorder.flush()
                         classifier=Classifier(Policy(track_iou=float(getattr(self.config,'FACE_AUTH_TRACK_IOU',0.35))))
                         display_states={};previous_observations=[];last_detected_at=-1e9
+                        self.alerts=self._alert_tracker()
                         with self.lock:
                             self.error='카메라 연결 끊김: 재연결 중';self.preview=None;self.raw=None;self.faces=[]
                         print('[Camera] 프레임 읽기 실패: 동일 장치 재연결 시도',flush=True)
@@ -285,6 +306,8 @@ class MainCamera:
                 faces=classifier.classify(observations,capture)
                 timestamp=cap.get(cv2.CAP_PROP_POS_MSEC) if cap is not None and is_file else (tick-start)*1000
                 display_states=self._update_display_authorization(faces,observations,display_states,tick)
+                alerts=self.alerts.update(faces,tick)
+                if alerts:self._record_alerts(alerts,faces)
                 previous_observations=list(observations)
                 self.recorder.add(frame,faces,capture,timestamp)
                 protected=protect(frame,faces)[0]
@@ -343,6 +366,7 @@ class MainCamera:
                     'recording':ready,'error':self.error,'camera_ready':ready,
                     'camera_state':state,'model_backend':self.model_backend,
                     'frame_sequence':self.frame_sequence,
+                    'alert_seq':self.alert_seq,'recent_alerts':list(self.alert_events),
                     'frame_age_ms':None if age is None else round(age*1000,1),
                     'camera_read_ms':round(self.last_read_ms,1),
                     'frame_process_ms':round(self.last_process_ms,1),

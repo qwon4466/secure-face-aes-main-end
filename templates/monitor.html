@@ -156,24 +156,43 @@
     .cam-placeholder .ph-icon { font-size: 32px; opacity: 0.55; display:flex; }
     .cam-placeholder .ph-text { font-size: 13px; font-weight: 500; }
 
-    /* ── 경고 토스트 ── */
-    .toast-container {
-      position: fixed;
-      bottom: 24px; right: 24px;
-      display: flex; flex-direction: column; gap: 8px;
-      z-index: 999;
+    /* ── 비허가자 감지 경고 (확인을 눌러야 닫힘) ── */
+    .alert-overlay {
+      position: fixed; inset: 0;
+      background: rgba(15,23,42,0.6);
+      display: flex; align-items: center; justify-content: center;
+      padding: 16px;
+      z-index: 1000;
     }
-    .toast {
-      background: #1E293B;
-      color: #fff;
-      padding: 12px 18px;
-      border-radius: 10px;
-      font-size: 13px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-      animation: slideIn 0.2s ease;
+    .alert-overlay[hidden] { display: none; }
+    .alert-box {
+      width: min(560px, 100%);
+      background: #fff;
+      border-top: 10px solid #DC2626;
+      border-radius: 16px;
+      padding: 36px 32px 28px;
+      text-align: center;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+      animation: alertPulse 1.2s ease-in-out infinite;
     }
-    .toast.warn { background: #B45309; }
-    @keyframes slideIn { from { transform: translateX(40px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    .alert-icon { color: #DC2626; display: flex; justify-content: center; margin-bottom: 12px; }
+    .alert-icon .ui-icon { width: 72px; height: 72px; }
+    .alert-title { font-size: 34px; font-weight: 800; color: #B91C1C; margin-bottom: 14px; }
+    .alert-count { font-size: 22px; font-weight: 700; color: #1E293B; margin-bottom: 8px; }
+    .alert-time { font-size: 16px; color: #475569; margin-bottom: 26px; line-height: 1.6; white-space: pre-line; }
+    .alert-confirm {
+      width: 100%;
+      padding: 16px;
+      font-size: 22px; font-weight: 700;
+      color: #fff; background: #DC2626;
+      border: 0; border-radius: 12px;
+      cursor: pointer;
+    }
+    .alert-confirm:hover { background: #B91C1C; }
+    @keyframes alertPulse {
+      0%, 100% { box-shadow: 0 20px 50px rgba(0,0,0,0.35), 0 0 0 0 rgba(220,38,38,0.5); }
+      50%      { box-shadow: 0 20px 50px rgba(0,0,0,0.35), 0 0 0 14px rgba(220,38,38,0); }
+    }
   </style>
 </head>
 <body>
@@ -271,8 +290,16 @@
   </div>
 </div>
 
-<!-- 토스트 컨테이너 -->
-<div class="toast-container" id="toastContainer"></div>
+<!-- 비허가자 감지 경고: 바깥 클릭·Esc로는 닫히지 않고 확인 버튼으로만 닫힌다 -->
+<div class="alert-overlay" id="alertOverlay" role="alertdialog" aria-modal="true" aria-labelledby="alertTitle" hidden>
+  <div class="alert-box">
+    <div class="alert-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-alert"></use></svg></div>
+    <div class="alert-title" id="alertTitle">비허가자 감지</div>
+    <div class="alert-count" id="alertCount"></div>
+    <div class="alert-time" id="alertTime"></div>
+    <button type="button" class="alert-confirm" id="alertConfirm">확인</button>
+  </div>
+</div>
 
 <script>
   // ── 스냅샷 폴링 (~10fps) ──
@@ -311,7 +338,7 @@
   setInterval(refreshFrame, 100);
 
   // ── 통계 폴링 ──
-  let prevUnk = 0;
+  let lastAlertSeq = null;   // 페이지를 연 시점 이전의 감지는 띄우지 않는다
   let statsInFlight = false;
   async function updateStats() {
     if (statsInFlight) return;
@@ -334,11 +361,14 @@
       // 외부인 경고: 현재 프레임의 비허가자 수 (같은 얼굴 중복 누적 없음)
       document.getElementById('stat-unk').textContent = d.unknown_alerts ?? 0;
 
-      // 외부인 새로 등장 시 경고 토스트 (현재 프레임 기준)
-      if ((d.unknown_count ?? 0) > prevUnk) {
-        showToast(`외부인 ${d.unknown_count}명 감지됨`, 'warn');
+      // 서버가 확정한 비허가자 감지 이벤트 (같은 사람은 한 번만)
+      const seq = d.alert_seq ?? 0;
+      if (lastAlertSeq === null || seq < lastAlertSeq) lastAlertSeq = seq;   // 첫 응답 / 서버 재시작
+      if (seq > lastAlertSeq) {
+        const latest = (d.recent_alerts || []).filter(e => e.id > lastAlertSeq).pop();
+        showAlert(seq - lastAlertSeq, latest ? latest.time : null);
+        lastAlertSeq = seq;
       }
-      prevUnk = d.unknown_count ?? 0;
     } catch {} finally {
       clearTimeout(timer);
       statsInFlight = false;
@@ -355,15 +385,27 @@
     btn.classList.add('active');
   }
 
-  // ── 토스트 ──
-  function showToast(msg, type = '') {
-    const container = document.getElementById('toastContainer');
-    const el = document.createElement('div');
-    el.className = 'toast' + (type ? ' ' + type : '');
-    el.textContent = msg;
-    container.appendChild(el);
-    setTimeout(() => el.remove(), 3000);
+  // ── 비허가자 감지 경고 ──
+  // 확인을 누르기 전까지 열려 있고, 그 사이 새로 감지된 인원은 누적해서 보여 준다.
+  const alertOverlay = document.getElementById('alertOverlay');
+  let alertTotal = 0;
+  let alertFirst = null;
+  function timeText(t) { return t ? t.slice(11, 19) : new Date().toTimeString().slice(0, 8); }
+  function showAlert(count, time) {
+    const t = timeText(time);
+    if (alertOverlay.hidden) { alertTotal = 0; alertFirst = t; }
+    alertTotal += count;
+    document.getElementById('alertCount').textContent = `비허가자 ${alertTotal}명이 감지되었습니다`;
+    document.getElementById('alertTime').textContent =
+      alertFirst === t ? `감지 시각 ${t}` : `처음 감지 ${alertFirst}\n최근 감지 ${t}`;
+    if (alertOverlay.hidden) {
+      alertOverlay.hidden = false;
+      document.getElementById('alertConfirm').focus();
+    }
   }
+  document.getElementById('alertConfirm').addEventListener('click', () => {
+    alertOverlay.hidden = true;
+  });
 </script>
 
 </body>
