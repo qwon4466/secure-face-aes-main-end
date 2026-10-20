@@ -175,38 +175,6 @@
     }
     .restore-img-wrap img { width: 100%; display: block; }
 
-    /* ── 비밀번호 모달 ── */
-    .modal-backdrop {
-      display: none; position: fixed; inset: 0;
-      background: rgba(15,23,42,0.5); backdrop-filter: blur(4px);
-      z-index: 200; align-items: center; justify-content: center;
-    }
-    .modal-backdrop.open { display: flex; }
-    .modal {
-      background: #fff; border-radius: 16px;
-      padding: 28px; width: 380px; max-width: 90vw;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.2);
-    }
-    .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
-    .modal-desc { font-size: 13px; color: #64748B; margin-bottom: 20px; }
-    .modal-input {
-      width: 100%; padding: 10px 14px;
-      border: 1px solid #E2E8F0; border-radius: 8px;
-      font-size: 14px; font-family: inherit;
-      margin-bottom: 16px; outline: none;
-      transition: border-color 0.15s;
-    }
-    .modal-input:focus { border-color: #3B82F6; }
-    .modal-error { font-size: 12px; color: #DC2626; margin-bottom: 12px; display: none; }
-    .modal-footer { display: flex; gap: 8px; justify-content: flex-end; }
-
-    .spinner {
-      display: inline-block; width: 14px; height: 14px;
-      border: 2px solid #fff; border-top-color: transparent;
-      border-radius: 50%; animation: spin 0.6s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
     /* ── 정보 칩 ── */
     .info-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
     .chip {
@@ -232,7 +200,6 @@
   </nav>
 </div>
 
-<div id="gpuBadge" style="margin:12px 16px 0; font-size:13px;"></div>
 <div id="saveBanner" style="display:none; margin:12px 16px 0; padding:12px 16px; background:#1e293b; border:1px solid #334155; border-radius:10px; color:#e2e8f0; font-size:14px;"></div>
 
 <div class="page">
@@ -258,50 +225,10 @@
   </div>
 </div>
 
-<!-- 비밀번호 모달 (SCR-005 / MOD-001) -->
-<div class="modal-backdrop" id="pwModal">
-  <div class="modal">
-    <div class="modal-title"><svg class="ui-icon" aria-hidden="true"><use href="#icon-key"></use></svg> 복원 인증</div>
-    <div class="modal-desc"><strong id="modalFrameId"></strong> 복원하려면<br>PSF 비밀번호를 입력하세요. (영상 복원은 시간이 걸립니다)</div>
-    <input type="password" class="modal-input" id="pwInput" placeholder="비밀번호 입력" />
-    <div class="modal-error" id="modalError">비밀번호가 올바르지 않거나 복원에 실패했습니다.</div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost" onclick="closeModal()">취소</button>
-      <button class="btn btn-primary" id="restoreBtn" onclick="doRestore()">
-        <span id="restoreBtnText">복원</span>
-      </button>
-    </div>
-  </div>
-</div>
-
 <script>
   let chunks = [];
   let selectedChunk = null;
   let selectedFrame = null;
-
-  // ── 보호본 미리보기 재생 (저장된 익명화 프레임을 영상처럼 순차 재생) ──
-  let previewChunk = null, previewFrames = [], previewIdx = 0, previewTimer = null;
-
-  function stopPreview() {
-    if (previewTimer) { clearInterval(previewTimer); previewTimer = null; }
-  }
-  function startPreview() {
-    stopPreview();
-    if (!previewFrames.length) return;
-    const btn = document.getElementById('previewPlayBtn');
-    if (btn) btn.innerText = '일시정지';
-    previewTimer = setInterval(() => {
-      const img = document.getElementById('previewPlayer');
-      if (!img) { stopPreview(); return; }
-      img.src = `/api/frame/${encodeURIComponent(previewChunk)}/${previewFrames[previewIdx]}`;
-      previewIdx = (previewIdx + 1) % previewFrames.length;
-    }, 100);  // 약 10fps
-  }
-  function togglePreview() {
-    const btn = document.getElementById('previewPlayBtn');
-    if (previewTimer) { stopPreview(); if (btn) btn.innerText = '재생'; }
-    else startPreview();
-  }
 
   // ── 청크 목록 로드 ──
   async function loadChunks() {
@@ -401,153 +328,23 @@
   }
 
   function renderDetail(d) {
-    stopPreview();
-    if(d.format === 'selective') { location.href='/selective/?chunk='+encodeURIComponent(d.chunk_id); return; }
-    if(d.format === 'raw') { document.getElementById('detailPanel').innerHTML='<h2>과거 저장 형식</h2><p>이 영상에는 집단별 복원 데이터가 없습니다.</p>관리자 메뉴의 원본 복원에서 확인하세요.'; return; }
-    const hasFaces = (d.total_faces ?? 0) > 0;
-
-    // 보호본 미리보기(완성 청크만): 저장된 익명화 프레임을 영상처럼 순차 재생
-    previewChunk = d.chunk_id;
-    previewFrames = [];
-    previewIdx = 0;
-    if (d.complete && Array.isArray(d.frames) && d.frames.length) {
-      const frames = d.frames;
-      const maxN = 300;  // 미리보기 최대 프레임(요청 부하 제한)
-      const step = Math.max(1, Math.floor(frames.length / maxN));
-      for (let i = 0; i < frames.length && previewFrames.length < maxN; i += step) {
-        previewFrames.push(frames[i].frame_id);
-      }
+    // 집단별 선택 복원 형식 → 선택 복원 화면으로 이동
+    if (d.format === 'selective') {
+      location.href = '/selective/?chunk=' + encodeURIComponent(d.chunk_id);
+      return;
     }
-    const hasPreview = previewFrames.length > 0;
-    const previewHtml = hasPreview ? `
-      <div class="restore-panel" id="previewPanel" style="display:block; margin-top:12px;">
-        <div class="restore-panel-title"><svg class="ui-icon" aria-hidden="true"><use href="#icon-video"></use></svg> 보호본 미리보기</div>
-        <div class="restore-img-wrap">
-          <img id="previewPlayer" style="width:100%; border-radius:8px; background:#000; display:block;">
-        </div>
-        <div style="margin-top:8px; display:flex; align-items:center; gap:8px;">
-          <button class="btn btn-ghost" id="previewPlayBtn" onclick="togglePreview()">일시정지</button>
-          <span style="color:#94a3b8; font-size:13px;">저장된 익명화(보호본) 영상입니다. 복원 전 상태예요.</span>
-        </div>
-      </div>` : '';
-
-    const html = `
-      <div class="detail-header">
-        <div>
-          <div class="detail-title">${d.display_name || d.chunk_id}</div>
-          <div class="detail-sub">시작: ${d.start_time ?? '알 수 없음'} · 마지막 업데이트: ${d.last_update ?? '-'}</div>
-        </div>
-        ${!hasFaces ? '' : (d.complete
-          ? `<button class="btn btn-primary" onclick="openGpuModal('${d.chunk_id}')">GPU 복원</button>`
-          : `<span class="chip chip-red">저장 중 · 저장 완료 후 복원 가능</span>`)}
-      </div>
-      <div class="info-chips">
-        <span class="chip chip-blue">${d.frame_count ?? '-'} 프레임</span>
-        <span class="chip ${hasFaces ? 'chip-yellow' : 'chip-green'}">얼굴 ${d.total_faces ?? '-'}건</span>
-        ${d.complete
-          ? (hasFaces ? '<span class="chip chip-red">복원 가능</span>' : '<span class="chip chip-green">복원 불필요</span>')
-          : '<span class="chip chip-red">저장 중</span>'}
-      </div>
-
-      ${previewHtml}
-
-      <div class="restore-panel" id="restoreResult" style="display:none">
-        <div class="restore-panel-title">복원 영상 (SCR-005)</div>
-        <div class="restore-img-wrap">
-          <video id="restoredVideo" controls autoplay loop style="width:100%;"></video>
-        </div>
-        <div style="margin-top:8px;">
-          <a id="downloadRestored" class="btn btn-primary" download="restored.mp4" style="text-decoration:none;">⬇ 복원 영상 다운로드</a>
-        </div>
-      </div>
-    `;
-    document.getElementById('detailPanel').innerHTML = html;
-    if (hasPreview) startPreview();
-  }
-
-  let restoreMode = 'video';
-
-  // ── 로컬(라즈베리파이 CPU) 복원 모달 ──
-  function openVideoModal(chunkId) {
-    selectedChunk = chunkId;
-    restoreMode = 'video';
-    openModal('이 청크를 영상으로 (로컬 CPU)');
-  }
-
-  // ── GPU(Modal) 복원 모달 ──
-  function openGpuModal(chunkId) {
-    selectedChunk = chunkId;
-    restoreMode = 'gpu';
-    openModal('이 청크를 GPU로 복원 (빠름)');
-  }
-
-  // ── 비밀번호 모달 ──
-  function openModal(targetLabel) {
-    document.getElementById('modalFrameId').textContent = targetLabel;
-    document.getElementById('pwInput').value = '';
-    document.getElementById('modalError').style.display = 'none';
-    document.getElementById('restoreBtnText').textContent = '복원';
-    document.getElementById('pwModal').classList.add('open');
-    setTimeout(() => document.getElementById('pwInput').focus(), 50);
-  }
-
-  function closeModal() {
-    document.getElementById('pwModal').classList.remove('open');
-  }
-
-  async function doRestore() {
-    const pw = document.getElementById('pwInput').value;
-    if (!pw) return;
-
-    const btn = document.getElementById('restoreBtn');
-    const txt = document.getElementById('restoreBtnText');
-    btn.disabled = true;
-    const label = restoreMode === 'gpu' ? 'GPU 복원 중...' : '복원 중...';
-    txt.innerHTML = `<span class="spinner"></span> ${label}`;
-    document.getElementById('modalError').style.display = 'none';
-
-    const endpoint = restoreMode === 'gpu'
-      ? '/api/restore_video_gpu' : '/api/restore_video';
-    try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({chunk_id: selectedChunk, password: pw}),
-      });
-      if (!res.ok) throw new Error('서버 오류');
-      const blob = await res.blob();
-      closeModal();
-      showRestoredVideo(URL.createObjectURL(blob));
-    } catch {
-      document.getElementById('modalError').style.display = 'block';
-    } finally {
-      btn.disabled = false;
-      txt.textContent = '복원';
+    // AES 원본 저장 형식 → 원본 복원 화면에서 확인
+    if (d.format === 'raw') {
+      document.getElementById('detailPanel').innerHTML = `
+        <div class="detail-placeholder">
+          <div class="ph-text"><b>과거 저장 형식</b><br>이 영상에는 집단별 복원 데이터가 없습니다.</div>
+          <a class="btn btn-primary" href="/decryption_page" style="margin-top:12px; text-decoration:none;">원본 복원으로 이동</a>
+        </div>`;
+      return;
     }
+    document.getElementById('detailPanel').innerHTML = `
+      <div class="detail-placeholder"><div class="ph-text">지원하지 않는 저장 형식입니다.</div></div>`;
   }
-
-  function showRestoredVideo(url) {
-    // 복원 완료 → 보호본 미리보기 정지·숨김 (원본만 표시, 둘이 같이 안 뜨게)
-    stopPreview();
-    const pp = document.getElementById('previewPanel');
-    if (pp) pp.style.display = 'none';
-    const panel = document.getElementById('restoreResult');
-    panel.style.display = 'block';
-    const vid = document.getElementById('restoredVideo');
-    vid.src = url;
-    const dl = document.getElementById('downloadRestored');
-    if (dl) dl.href = url;
-    panel.scrollIntoView({behavior: 'smooth'});
-  }
-
-  // ── 키보드 닫기 ──
-  document.getElementById('pwInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter') doRestore();
-    if (e.key === 'Escape') closeModal();
-  });
-  document.getElementById('pwModal').addEventListener('click', e => {
-    if (e.target === e.currentTarget) closeModal();
-  });
 
   // ── 저장 진행률(ETA) 배너 ──
   async function pollProgress() {
@@ -569,27 +366,11 @@
     } catch {}
   }
 
-  // ── GPU 서버 연결 상태 배지 ──
-  async function pollGpu() {
-    try {
-      const g = await fetch('/api/gpu_status').then(r => r.json());
-      const el = document.getElementById('gpuBadge');
-      if (!g.configured) { el.innerHTML = ''; return; }
-      if (g.connected) {
-        el.innerHTML = `<span style="padding:3px 10px; border-radius:999px; background:#dcfce7; color:#166534;">GPU 서버 연결됨${g.device ? ' · ' + g.device : ''}</span>`;
-      } else {
-        el.innerHTML = `<span style="padding:3px 10px; border-radius:999px; background:#fee2e2; color:#991b1b;">GPU 서버 끊김 (로컬 처리 중)</span>`;
-      }
-    } catch {}
-  }
-
   // ── 초기 로드 + 주기 갱신 ──
   loadChunks();
   setInterval(loadChunks, 10000);
   pollProgress();
   setInterval(pollProgress, 3000);
-  pollGpu();
-  setInterval(pollGpu, 5000);
 </script>
 
 </body>

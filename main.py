@@ -13,9 +13,8 @@ SecureFace-RX v2 — 통합 FastAPI 서버
   POST /api/register            → 얼굴 등록 (3각도)
   GET  /api/assets              → 녹화 청크 목록
   GET  /api/assets/{chunk_id}   → 청크 상세
-  GET  /recordings/{chunk_id}/thumb            → 청크 썸네일 JPEG
-  GET  /recordings/{chunk_id}/{frame_id}/frame → 개별 프레임 JPEG
-  POST /api/restore             → 비활성화된 구형 복원 API (호환용)
+  GET  /decryption_page         → 원본 복원 (관리자)
+  GET  /selective/              → 집단별 선택 복원 (관리자)
 
 실행:
   python main.py
@@ -51,7 +50,6 @@ from fastapi import UploadFile, File
 
 import config as c
 import event_log
-from fastapi.staticfiles import StaticFiles
 
 from core.selective_camera import MainCamera as CameraProcessor, DB_PATH, _adapt_array, _convert_array
 from core.selective_recognition import stable_person_id
@@ -68,10 +66,8 @@ camera = CameraProcessor(c)
 if os.environ.get("SRX_TEST_MODE") in ("synthetic", "file", "camera"):
     DB_PATH = str(camera.root / "test-users.db")
     IMAGE_DIR = str(camera.root / "test-registered-faces")
-    c.RECORD_RAM_DIR = str(camera.root / "legacy-static")
 c.RAW_DATA_DIR = camera.root
 camera.gallery_path = DB_PATH
-recorder = None  # PSF/INN 비활성화; camera가 집단별 선택 복원 청크를 저장
 
 # AES 원본 복원은 전용 worker에서 실행한다. 단일 worker로 CPU 경쟁을
 # 제한하면서도 FastAPI event loop와 HTTP 요청을 점유하지 않는다.
@@ -232,8 +228,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 templates = Jinja2Templates(directory=str(_PROJECT_ROOT / "templates"))
-os.makedirs(c.RECORD_RAM_DIR, exist_ok=True)
-app.mount("/recordings", StaticFiles(directory=c.RECORD_RAM_DIR), name="recordings")
 
 
 @app.middleware("http")
@@ -677,9 +671,7 @@ async def api_register_continuous_realsense(data: RegisterContinuous):
 # ── API — 보호 자산 목록 (Phase 4) ───────────────────────────────────────
 @app.get("/api/assets", dependencies=[Depends(require_admin)])
 async def api_assets():
-    if recorder is None:
-        return camera.list_assets() + _list_raw_asset_chunks()
-    return recorder.list_chunks()
+    return camera.list_assets() + _list_raw_asset_chunks()
 
 
 def _raw_asset_id(relative_dir: str) -> str:
@@ -741,9 +733,7 @@ def _list_raw_asset_chunks() -> list[dict]:
 @app.get("/api/save_progress", dependencies=[Depends(require_admin)])
 async def api_save_progress():
     """진행 중인 청크의 저장 진행률·ETA (자산 화면 상단 배너용)."""
-    if recorder is None:
-        return camera.get_save_progress()
-    return recorder.save_progress()
+    return camera.get_save_progress()
 
 
 # ── API — 감사/이벤트 로그 + 구형 상태 호환 API ─────────────────────────────
@@ -768,12 +758,6 @@ async def api_audit_detections():
     return event_log.read_detections(300)
 
 
-@app.get("/api/gpu_status")
-async def api_gpu_status():
-    """원격 GPU를 사용하지 않는 현재 시스템의 호환 응답."""
-    return {"configured": False, "connected": False, "device": "", "cuda": False}
-
-
 @app.get("/audit", response_class=HTMLResponse)
 async def page_audit(request: Request):
     if not _is_admin(request):
@@ -783,77 +767,11 @@ async def page_audit(request: Request):
 
 @app.get("/api/assets/{chunk_id}", dependencies=[Depends(require_admin)])
 async def api_asset_detail(chunk_id: str):
-    if recorder is None:
-        for item in camera.list_assets() + _list_raw_asset_chunks():
-            if item["chunk_id"] == chunk_id:
-                return item | {"frames": []}
-        raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
-    detail = recorder.get_chunk_detail(chunk_id)
-    if detail is None:
-        raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
-    return detail
+    for item in camera.list_assets() + _list_raw_asset_chunks():
+        if item["chunk_id"] == chunk_id:
+            return item | {"frames": []}
+    raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
 
-
-@app.get("/api/frame/{chunk_id}/{frame_id}")
-async def api_frame(chunk_id: str, frame_id: str):
-    """보호본 프레임 JPEG (미리보기 재생용). /recordings 마운트에 가로채이지 않게 /api 경로 사용."""
-    if recorder is None:
-        raise HTTPException(status_code=503, detail="Recorder not ready")
-    data = recorder.get_frame_jpeg(chunk_id, frame_id)
-    if data is None:
-        raise HTTPException(status_code=404, detail="프레임 없음")
-    return Response(content=data, media_type="image/jpeg",
-                    headers={"Cache-Control": "max-age=60"})
-
-
-@app.get("/recordings/{chunk_id}/thumb")
-async def recording_thumb(chunk_id: str):
-    if recorder is None:
-        raise HTTPException(status_code=503, detail="Recorder not ready")
-    data = recorder.get_thumb_jpeg(chunk_id)
-    if data is None:
-        raise HTTPException(status_code=404, detail="썸네일 없음")
-    return Response(content=data, media_type="image/jpeg",
-                    headers={"Cache-Control": "max-age=60"})
-
-
-@app.get("/recordings/{chunk_id}/{frame_id}/frame")
-async def recording_frame(chunk_id: str, frame_id: str):
-    if recorder is None:
-        raise HTTPException(status_code=503, detail="Recorder not ready")
-    data = recorder.get_frame_jpeg(chunk_id, frame_id)
-    if data is None:
-        raise HTTPException(status_code=404, detail="프레임 없음")
-    return Response(content=data, media_type="image/jpeg",
-                    headers={"Cache-Control": "no-cache"})
-
-
-# ── API — 구형 INN 복원 호환 경로 (비활성화) ───────────────────────────────
-class RestoreRequest(BaseModel):
-    chunk_id: str
-    frame_id: str
-    password: str
-
-
-@app.post("/api/restore")
-async def api_restore(req: RestoreRequest):
-    raise HTTPException(status_code=410, detail="INN 복원 기능은 비활성화되었습니다.")
-
-
-# ── API — 청크 전체 복원 영상 ─────────────────────────────────────────────
-class RestoreVideoRequest(BaseModel):
-    chunk_id: str
-    password: str
-
-
-@app.post("/api/restore_video")
-async def api_restore_video(req: RestoreVideoRequest):
-    raise HTTPException(status_code=410, detail="INN 복원 기능은 비활성화되었습니다.")
-
-
-@app.post("/api/restore_video_gpu")
-async def api_restore_video_gpu(req: RestoreVideoRequest):
-    raise HTTPException(status_code=410, detail="GPU/INN 복원 기능은 비활성화되었습니다.")
 
 @app.get("/decryption_page")
 async def decryption_page(request: Request):
