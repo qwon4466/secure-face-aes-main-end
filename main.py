@@ -842,6 +842,11 @@ def _list_raw_asset_chunks() -> list[dict]:
                     meta = json.load(f)
             except (OSError, ValueError):
                 continue
+            # 현재 저장 형식(encrypted_raw.bin.enc 하나에 원본·보호·집단 데이터를 담은 컨테이너)은
+            # camera.list_assets()가 'selective'로 보여 준다. 여기서 다시 'raw'로 넣으면 화면 트리의
+            # 같은 자리에 겹쳐 진짜 항목을 덮어써서, 새 녹화가 "과거 저장 형식"으로 보였다.
+            if isinstance(meta, dict) and meta.get("format") == "srx-container-v2":
+                continue
             rel_dir = os.path.relpath(root, base)
             parts = rel_dir.split(os.sep)
             if len(parts) < 2:
