@@ -113,11 +113,15 @@ class CPUAdapter:
     Explicit local ONNX models only; no FaceAnalysis model downloader or legacy recorder.
     """
     def __init__(self, detector_path, recognizer_path, gallery=None,
-                 detector_override=None, detector_threshold=0.6):
+                 detector_override=None, detector_threshold=0.6, recognizer_override=None):
+        # detector_override / recognizer_override: Hailo-8L 모델 (HailoSCRFD / HailoArcFace).
+        # 같은 detect / get_feat 인터페이스이므로 정렬·비교 로직은 그대로 쓴다.
         self.Result,self.cosine=legacy_components()
         if not isinstance(detector_threshold,(int,float)) or not 0<detector_threshold<=1:
             raise RestoreError('SCRFD 탐지 임계값은 0과 1 사이여야 합니다')
-        paths=[Path(recognizer_path)]
+        paths=[]
+        if recognizer_override is None:
+            paths.append(Path(recognizer_path))
         if detector_override is None:
             paths.append(Path(detector_path))
         if any(not p.is_file() or p.suffix!='.onnx' for p in paths):
@@ -127,12 +131,14 @@ class CPUAdapter:
         self.align=face_align.norm_crop
         self.detector=(detector_override if detector_override is not None else
                        get_model(str(detector_path),providers=['CPUExecutionProvider']))
-        self.recognizer=get_model(str(recognizer_path),providers=['CPUExecutionProvider'])
+        self.recognizer=(recognizer_override if recognizer_override is not None else
+                         get_model(str(recognizer_path),providers=['CPUExecutionProvider']))
         if not hasattr(self.detector,'detect') or not hasattr(self.recognizer,'get_feat'):
             raise RestoreError('SCRFD 탐지 모델 / ArcFace 인식 모델 종류를 확인하세요')
         if detector_override is None:
             self.detector.prepare(ctx_id=-1,input_size=(640,640),det_thresh=float(detector_threshold))
-        self.recognizer.prepare(ctx_id=-1)
+        if recognizer_override is None:
+            self.recognizer.prepare(ctx_id=-1)
         self.reload_gallery(gallery)
 
     def reload_gallery(self, gallery):

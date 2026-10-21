@@ -26,10 +26,13 @@ FACE_AUTH_CONFIRM_WINDOW = 3
 FACE_AUTH_REVOKE_MISMATCHES = 5
 FACE_AUTH_HOLD_SECONDS = 0.8
 
-# Hailo-8L 가속: SCRFD 탐지는 Hailo에서, ArcFace 인식은 CPU에서 실행.
-# True여도 hailo_platform이 없으면 자동으로 insightface(CPU)로 폴백.
-# ⚠️ Hailo ArcFace는 임베딩 공간이 달라 전환 시 재등록 필요.
+# Hailo-8L 가속: SCRFD 탐지와 ArcFace 인식을 Hailo에서 실행.
+# True여도 hailo_platform이 없거나 모델 로드에 실패하면 자동으로 CPU로 폴백.
+# Hailo ArcFace는 임베딩 공간이 CPU 모델과 달라, 인식 모델이 바뀌면 서버 시작 시
+# 등록 사진으로 DB 벡터를 자동으로 다시 계산한다 (DB는 먼저 백업, core/gallery_model.py).
+# 유사도 분포도 달라질 수 있으니 전환 후 MATCH_THRESHOLD를 실제 인식 결과로 확인할 것.
 USE_HAILO = True
+USE_HAILO_ARCFACE = True   # False면 ArcFace는 CPU (USE_HAILO가 True여야 Hailo ArcFace 사용)
 SCRFD_HEF_PATH = "/usr/share/hailo-models/scrfd_2.5g_h8l.hef"
 ARCFACE_HEF_PATH = "/usr/share/hailo-models/arcface_mobilefacenet.hef"
 HAILO_DET_THRESH = 0.5

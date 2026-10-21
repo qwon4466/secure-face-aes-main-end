@@ -17,6 +17,7 @@ from .camera_manager import CameraManager, SELECTED
 from .face_display import korean_font
 from .detection_alerts import AlertTracker
 from .access_policy import AccessEnv, evaluate, stored_floors
+from . import gallery_model
 
 DB_PATH='security_system.db'
 def _adapt_array(arr):
@@ -129,7 +130,8 @@ class MainCamera:
             candidates=list(modeldir.glob('*.onnx'))
             detector=next((str(p) for p in candidates if 'scrfd' in p.name.lower() or p.name.lower().startswith('det_')),'')
             recognizer=next((str(p) for p in candidates if 'w600k' in p.name.lower() or 'rec' in p.name.lower()),'')
-        detector_override=None
+        detector_override=None;recognizer_override=None
+        det_name=rec_name='CPU'
         if getattr(self.config,'USE_HAILO',False):
             try:
                 from hailo_infer import HAILO_AVAILABLE, HailoSCRFD
@@ -139,18 +141,37 @@ class MainCamera:
                     getattr(self.config,'SCRFD_HEF_PATH'),
                     conf_thresh=float(getattr(self.config,'HAILO_DET_THRESH',0.5)),
                 )
-                self.model_backend='Hailo-8L SCRFD + CPU ArcFace'
+                det_name='Hailo-8L'
                 print('[AI] Hailo-8L SCRFD 로드 성공',flush=True)
             except Exception as exc:
-                self.model_backend='CPU SCRFD + CPU ArcFace (Hailo fallback)'
+                det_name='CPU(Hailo fallback)'
                 print(f'[AI] Hailo SCRFD 초기화 실패: {exc} → CPU SCRFD 폴백',flush=True)
-        else:
-            self.model_backend='CPU SCRFD + CPU ArcFace'
+            if detector_override is not None and getattr(self.config,'USE_HAILO_ARCFACE',False):
+                try:
+                    from hailo_infer import HailoArcFace
+                    recognizer_override=HailoArcFace(getattr(self.config,'ARCFACE_HEF_PATH'))
+                    rec_name='Hailo-8L'
+                    print('[AI] Hailo-8L ArcFace 로드 성공',flush=True)
+                except Exception as exc:
+                    rec_name='CPU(Hailo fallback)'
+                    print(f'[AI] Hailo ArcFace 초기화 실패: {exc} → CPU ArcFace 폴백',flush=True)
+        self.model_backend=f'{det_name} SCRFD + {rec_name} ArcFace'
         adapter=CPUAdapter(detector,recognizer,
                            self.gallery_path if Path(self.gallery_path).is_file() else None,
                            detector_override=detector_override,
                            detector_threshold=float(getattr(
-                               self.config,'CPU_SCRFD_DET_THRESHOLD',0.6)))
+                               self.config,'CPU_SCRFD_DET_THRESHOLD',0.6)),
+                           recognizer_override=recognizer_override)
+        # 인식 모델이 바뀌었으면 등록 벡터를 같은 모델로 다시 계산한다 (core/gallery_model.py).
+        model_id=('hailo:'+Path(getattr(self.config,'ARCFACE_HEF_PATH','')).name
+                  if recognizer_override is not None else 'onnx:'+Path(recognizer).name)
+        try:
+            if gallery_model.sync(self.gallery_path,model_id,'onnx:'+Path(recognizer).name,
+                                  adapter.detector,adapter.recognizer,adapter.align,cv2.imread):
+                adapter.reload_gallery(self.gallery_path)
+        except Exception as exc:
+            print(f'[GALLERY][ERROR] 등록 벡터 재계산 실패: {exc}',flush=True)
+        self.recognizer_model=model_id
         print(f'[AI] 모델 준비 완료: {self.model_backend}',flush=True)
         self.detector=adapter.detector;self.recognizer=adapter.recognizer
         return adapter
