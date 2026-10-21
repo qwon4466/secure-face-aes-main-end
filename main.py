@@ -511,11 +511,18 @@ async def api_users():
 
 
 # ── API — 가상 환경 (시간·층 출입 통제) ───────────────────────────────────
+class WorkHours(BaseModel):
+    days: list[int]             # 0=월 … 6=일
+    start: str                  # "HH:MM"
+    end: str
+
+
 class AccessEnvUpdate(BaseModel):
     demo: bool | None = None
     day: int | None = None      # 0=월 … 6=일
     time: str | None = None     # "HH:MM"
     floor: int | None = None
+    work: WorkHours | None = None   # 근무시간 (이 밖에서는 등록자도 비허가)
     reset: bool = False
 
 
@@ -529,9 +536,35 @@ async def api_set_access_env(data: AccessEnvUpdate):
     try:
         if data.reset:
             return camera.access_env.reset()
-        return camera.access_env.update(data.demo, data.day, data.time, data.floor)
+        return camera.access_env.update(data.demo, data.day, data.time, data.floor,
+                                        data.work.model_dump() if data.work else None)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class FloorsUpdate(BaseModel):
+    floors: list[int]
+
+
+@app.put("/api/users/{name}/floors", dependencies=[Depends(require_admin)])
+async def api_update_floors(name: str, data: FloorsUpdate):
+    """등록된 사원의 출입 허가 층 수정."""
+    try:
+        floors = _register_floors(data.floors)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        stored = [row[0] for row in conn.execute("SELECT name FROM users")]
+        if not any(stable_person_id(n) == name for n in stored):
+            raise HTTPException(status_code=404, detail="사원을 찾을 수 없습니다.")
+        _save_access(conn, name, floors)
+        conn.commit()
+    finally:
+        conn.close()
+    if camera:
+        camera.reload_people()
+    return {"status": "ok", "name": name, "floors": floors}
 
 
 # ── API — DB 재로드 ───────────────────────────────────────────────────────

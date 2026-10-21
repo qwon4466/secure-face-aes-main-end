@@ -48,15 +48,40 @@ def test_demo_mode_overrides_and_persists(work):
     assert env.effective() == {'demo': True, 'day': 1, 'time': '17:59', 'floor': 3, 'after_hours': False}
     env.update(time='19:00')
     assert env.effective()['after_hours'] is True
-    assert json.loads(path.read_text()) == {'demo': True, 'day': 1, 'time': '19:00', 'floor': 3}
+    default_work = {'days': [0, 1, 2, 3, 4], 'start': '09:00', 'end': '18:00'}
+    saved = {'demo': True, 'day': 1, 'time': '19:00', 'floor': 3, 'work': default_work}
+    assert json.loads(path.read_text()) == saved
     for bad in ({'floor': 7}, {'day': 7}, {'time': '25:00'}, {'time': ''}):
         with pytest.raises(ValueError):
             env.update(**bad)
-    assert AccessEnv(path, [1, 2, 3]).state == {'demo': True, 'day': 1, 'time': '19:00', 'floor': 3}
+    assert AccessEnv(path, [1, 2, 3]).state == saved
     env.reset()
     assert AccessEnv(path, [1, 2, 3]).state['demo'] is False
     path.write_text('{broken')
     assert AccessEnv(path, [1, 2, 3]).state == AccessEnv(work / 'none.json', [1, 2, 3]).defaults()
+
+
+def test_work_hours_editable_persisted_and_kept_on_reset(work):
+    path = work / 'access_env.json'
+    env = AccessEnv(path, [1, 2, 3], work_days=[0, 1, 2, 3, 4], work_start='09:00', work_end='18:00')
+    monday = datetime(2026, 10, 19)
+    assert env.effective(monday.replace(hour=17))['after_hours'] is False
+    env.update(work={'days': [0, 5], 'start': '08:00', 'end': '17:00'})
+    assert env.effective(monday.replace(hour=17))['after_hours'] is True       # 17:00부터 비허가
+    assert env.effective(datetime(2026, 10, 24, 10))['after_hours'] is False   # 토요일 근무
+    assert env.effective(datetime(2026, 10, 20, 10))['after_hours'] is True    # 화요일은 근무일 아님
+    for bad in ({'days': [], 'start': '09:00', 'end': '18:00'},
+                {'days': [7], 'start': '09:00', 'end': '18:00'},
+                {'days': [0], 'start': '18:00', 'end': '09:00'},
+                {'days': [0], 'start': '9:00', 'end': '18:00'}):
+        with pytest.raises(ValueError):
+            env.update(work=bad)
+    reloaded = AccessEnv(path, [1, 2, 3])          # config 기본값보다 저장된 값이 우선
+    assert reloaded.state['work'] == {'days': [0, 5], 'start': '08:00', 'end': '17:00'}
+    reloaded.update(demo=True)
+    reloaded.reset()                               # 시연 상황만 초기화, 근무시간은 유지
+    assert reloaded.state['demo'] is False
+    assert AccessEnv(path, [1, 2, 3]).state['work']['end'] == '17:00'
 
 
 def _camera(work, env_state, people):

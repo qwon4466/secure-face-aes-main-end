@@ -111,6 +111,15 @@
     .field select, .field input { height: 36px; background: #fff; border: 1px solid #D9E4EF; border-radius: 7px; padding: 0 10px; color: #314560; min-width: 110px; font: inherit; font-size: 13px; }
     .field select:disabled, .field input:disabled { background: #F6F8FA; color: #ADB7C5; }
     .field .wide { min-width: 142px; }
+    .work-row { border-top: 1px solid #E9EEF5; padding: 15px 17px; display: grid; grid-template-columns: 175px 1fr; gap: 22px; align-items: start; }
+    .work-title { font-weight: 650; font-size: 13px; padding-top: 6px; }
+    .days { display: flex; flex-wrap: wrap; gap: 6px; }
+    .day { border: 1px solid #E0E8F3; background: #fff; border-radius: 7px; width: 36px; height: 36px; color: #8493A7; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; }
+    .day.on { background: #EAF2FF; border-color: #9DC2FF; color: #3B82F6; }
+    .day:disabled { cursor: not-allowed; opacity: .6; }
+    .work-note { font-size: 12px; align-self: center; }
+    .work-note.err { color: #B91C1C; }
+    .work-note.ok { color: #15803D; }
     .statusline { border-top: 1px solid #E9EEF5; background: #FBFCFF; display: flex; align-items: center; gap: 13px; flex-wrap: wrap; padding: 10px 17px; color: #60748F; font-size: 12px; }
     .statusline strong { color: #2D4363; }
     .statusline .deny { color: #B91C1C; }
@@ -118,12 +127,12 @@
     .separator { height: 14px; width: 1px; background: #D7E2EE; }
     .cam-meta { position: absolute; bottom: 12px; right: 14px; z-index: 3; background: rgba(15,23,42,.6); color: #fff; font-size: 11px; padding: 4px 8px; border-radius: 6px; }
     .cam-meta.sim { background: rgba(166,107,10,.85); }
-    @media (max-width: 1000px) { .scenario-body { grid-template-columns: 1fr; gap: 12px; } }
+    @media (max-width: 1000px) { .scenario-body, .work-row { grid-template-columns: 1fr; gap: 12px; } }
     @media (max-width: 700px) {
       .scenario { margin: 0 12px 14px; }
       .scenario-title small { display: none; }
       .scenario-head { align-items: flex-start; }
-      .scenario-body { padding: 12px; }
+      .scenario-body, .work-row { padding: 12px; }
     }
 
     /* ── 그리드 컨트롤 ── */
@@ -325,6 +334,24 @@
       <div class="field"><label for="simTarget">적용 카메라</label>
         <select id="simTarget" class="wide"><option value="cam1">CAM-01</option><option value="all">전체 카메라</option></select></div>
       <button type="button" class="sim-btn primary" id="simApply">이 상황 적용</button>
+    </div>
+  </div>
+  <div class="work-row">
+    <div class="work-title">근무시간 설정
+      <div class="smallnote">이 시간 밖에서는 등록자도 모두 비허가로 표시·알림합니다.</div>
+    </div>
+    <div class="fields">
+      <div class="field"><label>근무 요일</label>
+        <div class="days" id="workDays">
+          <button type="button" class="day" data-day="0">월</button><button type="button" class="day" data-day="1">화</button>
+          <button type="button" class="day" data-day="2">수</button><button type="button" class="day" data-day="3">목</button>
+          <button type="button" class="day" data-day="4">금</button><button type="button" class="day" data-day="5">토</button>
+          <button type="button" class="day" data-day="6">일</button>
+        </div></div>
+      <div class="field"><label for="workStart">시작</label><input id="workStart" type="time" value="09:00"></div>
+      <div class="field"><label for="workEnd">종료 (이때부터 비허가)</label><input id="workEnd" type="time" value="18:00"></div>
+      <button type="button" class="sim-btn primary" id="workSave">근무시간 저장</button>
+      <span class="work-note" id="workNote"></span>
     </div>
   </div>
   <div class="statusline">
@@ -550,13 +577,56 @@
     const meta = document.getElementById('cam1Meta');
     meta.textContent = `${eff.floor}층 · ${env.demo ? `시연 ${DAYS[eff.day]} ${eff.time}` : '실제 시각'}`;
     meta.classList.toggle('sim', env.demo);
+    renderWork(env.work);
   }
+
+  // ── 근무시간 설정 (이 시간 밖에서는 등록자도 비허가) ──
+  const work = {
+    days: [...document.querySelectorAll('#workDays .day')], start: document.getElementById('workStart'),
+    end: document.getElementById('workEnd'), save: document.getElementById('workSave'),
+    note: document.getElementById('workNote'),
+  };
+  let workDirty = false;
+  function renderWork(w) {
+    if (!workDirty) {
+      work.days.forEach(b => b.classList.toggle('on', w.days.includes(Number(b.dataset.day))));
+      work.start.value = w.start; work.end.value = w.end;
+    }
+    [...work.days, work.start, work.end, work.save].forEach(el => { el.disabled = !isAdmin; });
+  }
+  function workChanged() {
+    workDirty = true;
+    work.note.className = 'work-note'; work.note.textContent = '저장을 눌러야 반영됩니다';
+  }
+  work.days.forEach(b => b.addEventListener('click', () => { b.classList.toggle('on'); workChanged(); }));
+  [work.start, work.end].forEach(el => el.addEventListener('change', workChanged));
+  work.save.addEventListener('click', async () => {
+    const body = { work: {
+      days: work.days.filter(b => b.classList.contains('on')).map(b => Number(b.dataset.day)),
+      start: work.start.value, end: work.end.value,
+    } };
+    try {
+      const r = await fetch('/api/access/env', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '입력값을 확인하세요');
+      workDirty = false;
+      work.note.className = 'work-note ok'; work.note.textContent = '저장되었습니다';
+      renderEnv(data);
+    } catch (e) {
+      work.note.className = 'work-note err'; work.note.textContent = '저장 실패: ' + e.message;
+    }
+  });
   async function postEnv(body) {
     try {
       const r = await fetch('/api/access/env', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
-      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '');
+      if (!r.ok) {
+        const detail = (await r.json().catch(() => ({}))).detail;
+        throw new Error(typeof detail === 'string' ? detail : (r.status === 401 ? '' : '입력값을 확인하세요'));
+      }
       dirty = false;
       sim.note.textContent = NOTE;
       renderEnv(await r.json());

@@ -116,6 +116,10 @@ class MainCamera:
             self.adapter.reload_gallery(self.gallery_path)
         self._load_people()
 
+    def reload_people(self):
+        """얼굴 벡터는 그대로 두고 그룹·허가 층만 다시 읽는다 (허가 층 수정 시)."""
+        self._load_people()
+
     def _adapter(self):
         if self.test:return SyntheticAdapter()
         modeldir=Path(getattr(self.config,'SELECTIVE_MODEL_DIR',Path.home()/'.insightface/models/buffalo_s'))

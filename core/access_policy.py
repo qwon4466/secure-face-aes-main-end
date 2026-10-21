@@ -42,6 +42,21 @@ def stored_floors(text, valid):
     return sorted(set(floors))
 
 
+def check_work(days, start, end):
+    """근무시간 검사: 요일(0=월 … 6=일) 하나 이상, 시작 < 종료 (HH:MM, 같은 날 안)."""
+    try:
+        days = sorted({int(d) for d in days})
+    except (TypeError, ValueError):
+        raise ValueError('근무 요일 형식 오류')
+    if not days or any(not 0 <= d <= 6 for d in days):
+        raise ValueError('근무 요일을 하나 이상 선택하세요')
+    if not (isinstance(start, str) and isinstance(end, str) and _HHMM.match(start) and _HHMM.match(end)):
+        raise ValueError('근무 시각은 HH:MM 형식이어야 합니다')
+    if start >= end:
+        raise ValueError('근무 종료 시각은 시작 시각보다 늦어야 합니다')
+    return {'days': days, 'start': start, 'end': end}
+
+
 def evaluate(person, env):
     """(허가 여부, 사유). person은 미인식이면 None, 등록자면 {'group', 'floors'(없으면 전체 층)}."""
     if person is None:
@@ -64,19 +79,18 @@ class AccessEnv:
         self.path = Path(path)
         self.floors = sorted({int(f) for f in floors})
         self.camera_floor = int(camera_floor) if camera_floor in self.floors else self.floors[0]
-        self.work_days = tuple(sorted({int(d) for d in work_days}))
-        if not (_HHMM.match(work_start) and _HHMM.match(work_end) and work_start < work_end):
-            raise ValueError('근무 시간 설정 오류')
-        self.work_start, self.work_end = work_start, work_end
+        # config 값은 처음 한 번의 기본값. 이후 근무시간은 웹에서 바꾸고 파일에 저장된다.
+        self.default_work = check_work(work_days, work_start, work_end)
         self.state = self.defaults()
         try:
             saved = json.loads(self.path.read_text(encoding='utf-8'))
-            self.update(**{k: saved.get(k) for k in ('demo', 'day', 'time', 'floor')}, save=False)
+            self.update(**{k: saved.get(k) for k in ('demo', 'day', 'time', 'floor', 'work')}, save=False)
         except (OSError, ValueError, AttributeError, TypeError):
             pass
 
     def defaults(self):
-        return {'demo': False, 'day': 1, 'time': '19:00', 'floor': self.camera_floor}
+        return {'demo': False, 'day': 1, 'time': '19:00', 'floor': self.camera_floor,
+                'work': dict(self.default_work)}
 
     def effective(self, now=None):
         """지금 판정에 쓰는 환경. 시연 모드면 가정 값, 아니면 실제 시각과 카메라 설치 층."""
@@ -86,16 +100,18 @@ class AccessEnv:
         else:
             now = now or datetime.now()
             day, hhmm, floor = now.weekday(), now.strftime('%H:%M'), self.camera_floor
-        after = day not in self.work_days or not (self.work_start <= hhmm < self.work_end)
+        work = state['work']
+        after = day not in work['days'] or not (work['start'] <= hhmm < work['end'])
         return {'demo': state['demo'], 'day': day, 'time': hhmm, 'floor': floor, 'after_hours': after}
 
     def get(self):
         return dict(self.state, floors=list(self.floors), camera_floor=self.camera_floor,
-                    work={'days': list(self.work_days), 'start': self.work_start, 'end': self.work_end},
                     effective=self.effective())
 
-    def update(self, demo=None, day=None, time=None, floor=None, save=True):
+    def update(self, demo=None, day=None, time=None, floor=None, work=None, save=True):
         state = dict(self.state)
+        if work is not None:
+            state['work'] = check_work(work.get('days'), work.get('start'), work.get('end'))
         if demo is not None:
             state['demo'] = bool(demo)
         if day is not None:
@@ -120,5 +136,6 @@ class AccessEnv:
         return self.get()
 
     def reset(self):
-        self.state = self.defaults()
+        """시연 상황만 기본값으로. 웹에서 정한 근무시간은 유지한다."""
+        self.state = dict(self.defaults(), work=self.state['work'])
         return self.update()
