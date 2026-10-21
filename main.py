@@ -54,6 +54,7 @@ import event_log
 from core.selective_camera import MainCamera as CameraProcessor, DB_PATH, _adapt_array, _convert_array
 from core.selective_recognition import stable_person_id
 from core.access_policy import parse_floors, stored_floors
+from core.retention import cleanup as retention_cleanup
 from core.selective_routes import create_router as create_selective_router
 from core.selective_index import completed as completed_selective, find as find_selective
 
@@ -195,6 +196,33 @@ async def auto_recognize_logger():
                 
         print("="*50 + "\n")
         
+# ── 오래된 녹화 자동 삭제 ─────────────────────────────────────────────────
+def _retention_once():
+    report = retention_cleanup(
+        camera.root, [camera.root / ".results"],
+        retention_days=float(getattr(c, "RETENTION_DAYS", 7)),
+        min_free_bytes=float(getattr(c, "MIN_FREE_GB", 5)) * 1024**3,
+        protect_seconds=float(getattr(c, "RETENTION_PROTECT_MINUTES", 10)) * 60,
+        result_keep_seconds=float(getattr(c, "RESTORE_RESULT_KEEP_HOURS", 24)) * 3600,
+    )
+    if report["expired"] or report["space"] or report["results"]:
+        print(f'[RETENTION] 삭제 | 보관기간 초과={len(report["expired"])}개 | '
+              f'공간 확보={len(report["space"])}개 | 복원결과={len(report["results"])}개 | '
+              f'확보={report["freed_bytes"] / 1024**2:.0f}MB | '
+              f'대상={", ".join((report["expired"] + report["space"])[:5]) or "-"}', flush=True)
+    return report
+
+
+def _retention_loop(stop: threading.Event):
+    interval = max(10.0, float(getattr(c, "RETENTION_CHECK_SECONDS", 60)))
+    while not stop.is_set():
+        try:
+            _retention_once()
+        except Exception as exc:
+            print(f"[RETENTION][ERROR] 자동 삭제 실패: {exc}", flush=True)
+        stop.wait(interval)
+
+
 # ── Lifespan (FastAPI 0.93+ 권장 방식) ───────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -223,11 +251,18 @@ async def lifespan(app: FastAPI):
     # 👇 여기에 이 한 줄을 추가하세요! (30초 타이머 시작) 👇
     # Recognition is performed once by the selective camera pipeline.
 
+    # 3. 오래된 녹화 자동 삭제 (운영 데이터에서만)
+    retention_stop = threading.Event()
+    if camera.operational:
+        threading.Thread(target=_retention_loop, args=(retention_stop,),
+                         name="retention", daemon=True).start()
+
     yield  # --- 서버 가동 중 ---
-    
+
 
 
     # 서버 종료 시 안전한 자원 해제
+    retention_stop.set()
     if camera:
         camera.stop()
 

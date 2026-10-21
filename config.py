@@ -72,6 +72,13 @@ FORCE_VIDEO = False
 # 저장 계층: raw_data/YYYY-MM-DD/HH/HH-MM-SS/
 CHUNK_SECONDS = 60  # 1분
 
+# 오래된 녹화 자동 삭제 (운영 모드에서만, RETENTION_CHECK_SECONDS마다 검사)
+RETENTION_DAYS = 7               # 이 기간이 지난 녹화는 삭제 (0이면 기간 기준 삭제 안 함)
+MIN_FREE_GB = 5                  # 남은 공간이 이보다 적으면 가장 오래된 녹화부터 삭제
+RETENTION_PROTECT_MINUTES = 10   # 방금 저장된 녹화는 공간이 부족해도 지우지 않음
+RESTORE_RESULT_KEEP_HOURS = 24   # 복원 결과(복호화된 영상, raw_data/.results) 보관 시간
+RETENTION_CHECK_SECONDS = 60
+
 
 # AES 암호화 원본 저장 위치
 RAW_ENCRYPT_DIR = str(RAW_DATA_DIR)  # legacy name; all active chunk storage is unified here
