@@ -32,6 +32,7 @@ import json
 import os
 import secrets
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -918,6 +919,50 @@ async def api_asset_detail(chunk_id: str):
         if item["chunk_id"] == chunk_id:
             return item | {"frames": []}
     raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
+
+
+# ── 보호(블러) 영상 재생 ──────────────────────────────────────────────────
+# 컨테이너의 protected 구역은 이미 블러된 영상이라 암호화되어 있지 않다. 그래서 복원 비밀번호 없이
+# 관리자 로그인만으로 볼 수 있다. 브라우저가 재생하지 못하는 FFV1 AVI를 청크마다 한 번 MP4로
+# 바꿔 복원 결과 폴더에 두고(오래된 녹화 자동 삭제가 24시간 뒤 정리) 다시 쓴다.
+_PROTECTED_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _convert_protected(chunk_path: Path, out: Path):
+    from core.selective_crypto import section_bytes
+    out.parent.mkdir(parents=True, exist_ok=True)
+    src = out.with_name(out.name + ".src.avi")
+    tmp = out.with_name(out.name + ".tmp.mp4")
+    try:
+        src.write_bytes(section_bytes(chunk_path, "protected"))
+        run = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+             "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+             "-movflags", "+faststart", str(tmp)],
+            capture_output=True, timeout=180)
+        if run.returncode:
+            raise RuntimeError(run.stderr.decode(errors="replace")[-300:])
+        os.replace(tmp, out)
+    finally:
+        src.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
+
+
+@app.get("/api/assets/{chunk_id}/protected.mp4", dependencies=[Depends(require_admin)])
+async def api_asset_protected_video(chunk_id: str):
+    try:
+        path = find_selective(camera.chunks, chunk_id)   # chunk_id 형식 검사 포함
+    except Exception:
+        raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
+    out = camera.root / (".results" if camera.operational else "results") / f"protected-{chunk_id}.mp4"
+    async with _PROTECTED_LOCKS.setdefault(chunk_id, asyncio.Lock()):
+        if not out.is_file():
+            try:
+                await asyncio.to_thread(_convert_protected, path, out)
+            except Exception as exc:
+                print(f"[ASSETS][ERROR] 보호 영상 변환 실패 | 청크={chunk_id} | 원인={exc}", flush=True)
+                raise HTTPException(status_code=500, detail="보호 영상을 준비하지 못했습니다.")
+    return FileResponse(out, media_type="video/mp4", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/decryption_page")
