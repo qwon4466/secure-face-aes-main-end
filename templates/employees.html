@@ -213,12 +213,13 @@
         <tr>
           <th>사원</th>
           <th>그룹</th>
+          <th>출입 허가 층</th>
           <th>등록 각도</th>
           <th></th>
         </tr>
       </thead>
       <tbody id="empTable">
-        <tr><td colspan="4">
+        <tr><td colspan="5">
           <div class="empty-state">
             <div class="empty-icon">⏳</div>
             <div class="empty-text">로딩 중...</div>
@@ -273,7 +274,7 @@
   function renderTable(list) {
     const tbody = document.getElementById('empTable');
     if (list.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="4">
+      tbody.innerHTML = `<tr><td colspan="5">
         <div class="empty-state">
           <div class="empty-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-user"></use></svg></div>
           <div class="empty-text">등록된 사원이 없습니다.<br><a href="/register" style="color:#3B82F6">사원 등록</a>으로 추가하세요.</div>
@@ -299,6 +300,7 @@
           </div>
         </td>
         <td><span class="group-badge ${groupClass}">${e.group || '-'}</span></td>
+        <td style="font-size:13px">${(e.floors || []).map(f => Number(f) + '층').join(', ') || '-'}</td>
         <td style="color:#64748B;font-size:13px">정면 · 좌측면 · 우측면</td>
         <td style="text-align:right">
           <button class="btn btn-danger btn-sm" onclick="openDelModal('${e.name}')">삭제</button>

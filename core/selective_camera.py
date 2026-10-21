@@ -11,11 +11,12 @@ from collections import deque
 import cv2
 import numpy as np
 from .selective_crypto import ROOT, RestoreError, generate_keys, keyset, private_dir, protect
-from .selective_recognition import CPUAdapter, Classifier, Policy, SyntheticAdapter, synthetic_frame, iou
+from .selective_recognition import CPUAdapter, Classifier, Policy, SyntheticAdapter, synthetic_frame, iou, stable_person_id
 from .selective_recording import Recorder
 from .camera_manager import CameraManager, SELECTED
 from .face_display import korean_font
 from .detection_alerts import AlertTracker
+from .access_policy import AccessEnv, evaluate, stored_floors
 
 DB_PATH='security_system.db'
 def _adapt_array(arr):
@@ -50,6 +51,14 @@ class MainCamera:
         self.error=None;self.faces=[];self.metrics={};self.running=False;self.recorder=None
         # 비허가자 감지 이벤트: 모니터 팝업(alert_seq/recent_alerts)과 감지 이력(on_alert)에 사용
         self.alerts=self._alert_tracker();self.alert_seq=0;self.alert_events=deque(maxlen=20);self.on_alert=None
+        # 시간·층별 출입 판정 (표시·알림 전용, 암호화 그룹과 무관)
+        self.access_floors=list(getattr(config,'ACCESS_FLOORS',[1,2,3]))
+        self.access_env=AccessEnv(self.root/'access_env.json',self.access_floors,
+                                  camera_floor=getattr(config,'ACCESS_CAMERA_FLOOR',None),
+                                  work_days=getattr(config,'WORK_DAYS',(0,1,2,3,4)),
+                                  work_start=getattr(config,'WORK_START','09:00'),
+                                  work_end=getattr(config,'WORK_END','18:00'))
+        self.people={}
         self.model_backend='initializing'
         self.last_preview_at=None;self.frame_sequence=0
         self.last_read_ms=0.0;self.last_process_ms=0.0
@@ -58,21 +67,54 @@ class MainCamera:
         return AlertTracker(getattr(self.config,'DETECT_ALERT_CONFIRM_SECONDS',1.0),
                             getattr(self.config,'DETECT_ALERT_REARM_SECONDS',5.0))
 
-    def _record_alerts(self, alerts, faces):
+    def _record_alerts(self, alerts, faces, names):
         stamp=time.strftime('%Y-%m-%dT%H:%M:%S')
-        in_view=sum(not f.get('authorized',False) for f in faces)
+        in_view=sum(not f.get('allowed',False) for f in faces)
         with self.lock:
-            for _ in alerts:
+            for face in alerts:
                 self.alert_seq+=1
-                self.alert_events.append({'id':self.alert_seq,'time':stamp,'in_view':in_view})
+                self.alert_events.append({'id':self.alert_seq,'time':stamp,'in_view':in_view,
+                                          'reason':face.get('access_reason','')})
         if self.on_alert:
             for face in alerts:
-                try:self.on_alert(face)
+                try:self.on_alert(face,names.get(face.get('track_id')))
                 except Exception as exc:print('[Alert] 감지 이력 기록 실패:',exc,flush=True)
+
+    def _load_people(self):
+        """등록자별 그룹(가장 최근 등록 값)과 출입 허가 층. 층 정보가 없으면 전체 층 허가."""
+        people={}
+        try:
+            conn=sqlite3.connect(Path(self.gallery_path).resolve().as_uri()+'?mode=ro',uri=True)
+            try:
+                for name,group in conn.execute('SELECT name, auth_group FROM users ORDER BY id'):
+                    people[stable_person_id(name)]={'group':group,'floors':None}
+                try:
+                    for name,floors in conn.execute('SELECT name, floors FROM person_access'):
+                        if name in people:people[name]['floors']=stored_floors(floors,self.access_floors)
+                except sqlite3.OperationalError:
+                    pass   # 층 정보 도입 전 DB
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError):
+            pass
+        self.people=people
+
+    def _apply_access(self, faces, display_states):
+        """face['allowed'], face['access_reason'] 설정. 이름은 얼굴 기록(청크 메타데이터)에 넣지 않고 따로 돌려준다."""
+        env=self.access_env.effective();people=self.people;names={}
+        for face in faces:
+            person=None
+            if face.get('authorized',False):
+                person=display_states.get(face.get('track_id'),{}).get('identity')
+            face['allowed'],face['access_reason']=evaluate(
+                None if person is None else people.get(person,{}),env)
+            if person is not None:names[face.get('track_id')]=person
+        return names
 
     def reload_db(self):
         if self.adapter is not None and not self.test:
             self.adapter.reload_gallery(self.gallery_path)
+        self._load_people()
 
     def _adapter(self):
         if self.test:return SyntheticAdapter()
@@ -234,6 +276,7 @@ class MainCamera:
         try:
             korean_font()
             self.adapter=self._adapter()
+            self._load_people()
             classifier=Classifier(Policy(track_iou=float(getattr(self.config,'FACE_AUTH_TRACK_IOU',0.35))))
             display_states={}
             previous_observations=[];last_detected_at=-1e9;last_ai_error_log=0.0
@@ -306,8 +349,9 @@ class MainCamera:
                 faces=classifier.classify(observations,capture)
                 timestamp=cap.get(cv2.CAP_PROP_POS_MSEC) if cap is not None and is_file else (tick-start)*1000
                 display_states=self._update_display_authorization(faces,observations,display_states,tick)
+                names=self._apply_access(faces,display_states)
                 alerts=self.alerts.update(faces,tick)
-                if alerts:self._record_alerts(alerts,faces)
+                if alerts:self._record_alerts(alerts,faces,names)
                 previous_observations=list(observations)
                 self.recorder.add(frame,faces,capture,timestamp)
                 protected=protect(frame,faces)[0]
@@ -361,12 +405,14 @@ class MainCamera:
             real_faces=[f for f in self.faces if not f.get('detector_hold',False)]
             return {'employee_count':sum(f.get('authorized',False) for f in real_faces),
                     'unknown_count':sum(not f.get('authorized',False) for f in real_faces),
+                    'denied_count':sum(not f.get('allowed',False) for f in real_faces),
                     'detected_face_count':len(real_faces),
                     'held_face_count':sum(f.get('detector_hold',False) for f in self.faces),
                     'recording':ready,'error':self.error,'camera_ready':ready,
                     'camera_state':state,'model_backend':self.model_backend,
                     'frame_sequence':self.frame_sequence,
                     'alert_seq':self.alert_seq,'recent_alerts':list(self.alert_events),
+                    'access_env':self.access_env.get(),
                     'frame_age_ms':None if age is None else round(age*1000,1),
                     'camera_read_ms':round(self.last_read_ms,1),
                     'frame_process_ms':round(self.last_process_ms,1),
@@ -385,6 +431,8 @@ class MainCamera:
                 'arcface_similarity':f.get('similarity'),
                 'recognition_status':f.get('recognition_status','unknown'),
                 'authorized':bool(f.get('authorized',False)),
+                'allowed':bool(f.get('allowed',False)),
+                'access_reason':f.get('access_reason',''),
                 'detector_hold':bool(f.get('detector_hold',False)),
             } for f in self.faces]
         stats['recognition_thresholds']={

@@ -45,12 +45,12 @@ def log_restore(chunk_id: str, who: str, ip: str, success: bool, mode: str = "gp
     })
 
 
-def log_detection(name: str, group: str, sim, track=None):
-    """비허가자(미등록) 감지 기록. sim은 인식 실패 시 None."""
+def log_detection(name: str, group: str, sim, track=None, reason=None):
+    """비허가자 감지 기록. sim은 인식 실패 시 None, reason은 출입 거부 사유."""
     _append(_DETECT_LOG, {
         "name": name, "group": group,
         "sim": None if sim is None else round(float(sim), 3),
-        "track": track,
+        "track": track, "reason": reason,
     })
 
 

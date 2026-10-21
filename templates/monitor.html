@@ -78,6 +78,54 @@
     }
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 
+    /* ── 관제 상황 시뮬레이션 (시간·층 출입 통제) ── */
+    .mode-pill {
+      margin-left: auto; align-self: center;
+      display: inline-flex; gap: 6px; align-items: center;
+      border: 1px solid #FFDDA3; background: #FFF8E8; color: #A66B0A;
+      padding: 7px 11px; border-radius: 7px; font-weight: 700; font-size: 11px;
+    }
+    .mode-pill.off { color: #72829B; border-color: #DFE7F0; background: #fff; }
+    .scenario {
+      margin: 0 24px 16px; background: #fff; border: 1px solid #E2E8F0;
+      border-radius: 12px; box-shadow: 0 2px 9px rgba(35,57,80,0.03); overflow: hidden;
+    }
+    .scenario.active-sim { border-color: #C6DAFD; }
+    .scenario-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 13px 17px; border-bottom: 1px solid #E9EEF5; }
+    .scenario-title { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 14px; }
+    .scenario-title svg { color: #3B82F6; }
+    .scenario-title small { font-size: 11px; font-weight: 500; color: #8493AA; margin-left: 6px; }
+    .sim-btn { border: 1px solid #DBE4F0; background: #fff; color: #48607F; border-radius: 7px; padding: 8px 12px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .sim-btn.primary { background: #3B82F6; color: #fff; border-color: #3B82F6; }
+    .sim-btn:disabled { opacity: .5; cursor: not-allowed; }
+    .scenario-body { padding: 15px 17px; display: grid; grid-template-columns: 175px 1fr; gap: 22px; align-items: start; }
+    .switchline { padding-top: 6px; display: flex; gap: 10px; align-items: center; font-weight: 650; font-size: 13px; }
+    .switch { width: 39px; height: 23px; background: #CAD4E2; border-radius: 20px; position: relative; cursor: pointer; border: 0; padding: 0; flex-shrink: 0; }
+    .switch::before { content: ''; position: absolute; background: #fff; width: 17px; height: 17px; left: 3px; top: 3px; border-radius: 50%; transition: .15s; box-shadow: 0 1px 3px rgba(0,0,0,.13); }
+    .switch.on { background: #3B82F6; }
+    .switch.on::before { left: 19px; }
+    .switch:disabled { opacity: .5; cursor: not-allowed; }
+    .smallnote { font-size: 11px; color: #8A9BB4; margin-top: 7px; line-height: 1.6; }
+    .fields { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+    .field label { display: block; color: #637893; font-size: 11px; margin-bottom: 7px; font-weight: 650; }
+    .field select, .field input { height: 36px; background: #fff; border: 1px solid #D9E4EF; border-radius: 7px; padding: 0 10px; color: #314560; min-width: 110px; font: inherit; font-size: 13px; }
+    .field select:disabled, .field input:disabled { background: #F6F8FA; color: #ADB7C5; }
+    .field .wide { min-width: 142px; }
+    .statusline { border-top: 1px solid #E9EEF5; background: #FBFCFF; display: flex; align-items: center; gap: 13px; flex-wrap: wrap; padding: 10px 17px; color: #60748F; font-size: 12px; }
+    .statusline strong { color: #2D4363; }
+    .statusline .deny { color: #B91C1C; }
+    .statusline .ok { color: #15803D; }
+    .separator { height: 14px; width: 1px; background: #D7E2EE; }
+    .cam-meta { position: absolute; bottom: 12px; right: 14px; z-index: 3; background: rgba(15,23,42,.6); color: #fff; font-size: 11px; padding: 4px 8px; border-radius: 6px; }
+    .cam-meta.sim { background: rgba(166,107,10,.85); }
+    @media (max-width: 1000px) { .scenario-body { grid-template-columns: 1fr; gap: 12px; } }
+    @media (max-width: 700px) {
+      .scenario { margin: 0 12px 14px; }
+      .scenario-title small { display: none; }
+      .scenario-head { align-items: flex-start; }
+      .scenario-body { padding: 12px; }
+    }
+
     /* ── 그리드 컨트롤 ── */
     .grid-header {
       display: flex;
@@ -179,6 +227,7 @@
     .alert-icon .ui-icon { width: 72px; height: 72px; }
     .alert-title { font-size: 34px; font-weight: 800; color: #B91C1C; margin-bottom: 14px; }
     .alert-count { font-size: 22px; font-weight: 700; color: #1E293B; margin-bottom: 8px; }
+    .alert-reason { font-size: 18px; font-weight: 700; color: #B91C1C; margin-bottom: 8px; }
     .alert-time { font-size: 16px; color: #475569; margin-bottom: 26px; line-height: 1.6; white-space: pre-line; }
     .alert-confirm {
       width: 100%;
@@ -234,7 +283,7 @@
   <div class="stat-card">
     <div class="stat-icon unknown"><svg class="ui-icon" aria-hidden="true"><use href="#icon-alert"></use></svg></div>
     <div>
-      <div class="stat-label">외부인 경고</div>
+      <div class="stat-label">비허가자</div>
       <div class="stat-value" id="stat-unk">0</div>
     </div>
   </div>
@@ -245,7 +294,47 @@
       <div><span class="badge-rec" id="recordingBadge" style="display:none">REC</span></div>
     </div>
   </div>
+  <span class="mode-pill off" id="modePill">실제 환경 기준</span>
 </div>
+
+<!-- 관제 상황 시뮬레이션: 시연 모드에서 가정한 요일·시간·층으로 출입을 판정 (관리자만 변경) -->
+<section class="scenario" id="scenario">
+  <div class="scenario-head">
+    <div class="scenario-title">
+      <svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      관제 상황 시뮬레이션 <small>현재 요일·시간·층을 가정하여 출입 판정을 시연합니다.</small>
+    </div>
+    <button type="button" class="sim-btn" id="simReset">기본값 복원</button>
+  </div>
+  <div class="scenario-body">
+    <div>
+      <div class="switchline">
+        <button type="button" class="switch" id="simSwitch" role="switch" aria-checked="false" aria-label="시연 모드"></button>
+        <span id="simLabel">시연 모드 OFF</span>
+      </div>
+      <div class="smallnote" id="simNote">ON 시 실제 시각 대신 아래에서 정한 상황을 적용합니다.</div>
+    </div>
+    <div class="fields">
+      <div class="field"><label for="simDay">가정 요일</label>
+        <select id="simDay">
+          <option value="0">월요일</option><option value="1">화요일</option><option value="2">수요일</option>
+          <option value="3">목요일</option><option value="4">금요일</option><option value="5">토요일</option><option value="6">일요일</option>
+        </select></div>
+      <div class="field"><label for="simTime">가정 시간</label><input id="simTime" type="time" value="19:00"></div>
+      <div class="field"><label for="simFloor">가정 층수</label><select id="simFloor"></select></div>
+      <div class="field"><label for="simTarget">적용 카메라</label>
+        <select id="simTarget" class="wide"><option value="cam1">CAM-01</option><option value="all">전체 카메라</option></select></div>
+      <button type="button" class="sim-btn primary" id="simApply">이 상황 적용</button>
+    </div>
+  </div>
+  <div class="statusline">
+    <span id="simMode">● 실제 환경</span>
+    <span class="separator"></span>
+    <span>적용 기준: <strong id="simContext">-</strong></span>
+    <span class="separator"></span>
+    <span id="simRule">-</span>
+  </div>
+</section>
 
 <!-- 그리드 컨트롤 -->
 <div class="grid-header">
@@ -262,6 +351,7 @@
   <div class="cam-tile live">
     <img id="streamImg" alt="CAM-01" style="width:100%;height:100%;object-fit:cover;display:block;">
     <div class="cam-label">CAM-01</div>
+    <div class="cam-meta" id="cam1Meta"></div>
     <div class="cam-live-badge" id="cameraLiveBadge" style="display:none">LIVE</div>
     <div class="cam-placeholder" id="cameraStatus" style="position:absolute;inset:0;z-index:2">
       <div class="ph-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg></div>
@@ -296,6 +386,7 @@
     <div class="alert-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-alert"></use></svg></div>
     <div class="alert-title" id="alertTitle">비허가자 감지</div>
     <div class="alert-count" id="alertCount"></div>
+    <div class="alert-reason" id="alertReason"></div>
     <div class="alert-time" id="alertTime"></div>
     <button type="button" class="alert-confirm" id="alertConfirm">확인</button>
   </div>
@@ -358,15 +449,17 @@
         (d.camera_state === 'stale' ? '새 프레임 수신 지연' :
          d.camera_state === 'stopped' ? '카메라 중지됨' : '카메라 준비 중');
       document.getElementById('stat-emp').textContent = d.employee_count ?? 0;
-      // 외부인 경고: 현재 프레임의 비허가자 수 (같은 얼굴 중복 누적 없음)
-      document.getElementById('stat-unk').textContent = d.unknown_alerts ?? 0;
+      // 현재 화면의 비허가자 수 (미등록 + 시간·층 출입 거부)
+      document.getElementById('stat-unk').textContent = d.denied_count ?? d.unknown_alerts ?? 0;
+      if (d.access_env) renderEnv(d.access_env);
 
       // 서버가 확정한 비허가자 감지 이벤트 (같은 사람은 한 번만)
       const seq = d.alert_seq ?? 0;
       if (lastAlertSeq === null || seq < lastAlertSeq) lastAlertSeq = seq;   // 첫 응답 / 서버 재시작
       if (seq > lastAlertSeq) {
-        const latest = (d.recent_alerts || []).filter(e => e.id > lastAlertSeq).pop();
-        showAlert(seq - lastAlertSeq, latest ? latest.time : null);
+        const fresh = (d.recent_alerts || []).filter(e => e.id > lastAlertSeq);
+        const latest = fresh[fresh.length - 1];
+        showAlert(seq - lastAlertSeq, latest ? latest.time : null, fresh.map(e => e.reason).filter(Boolean));
         lastAlertSeq = seq;
       }
     } catch {} finally {
@@ -374,9 +467,6 @@
       statsInFlight = false;
     }
   }
-
-  setInterval(updateStats, 1000);
-  updateStats();
 
   // ── 그리드 전환 ──
   function setGrid(cols, btn) {
@@ -390,12 +480,16 @@
   const alertOverlay = document.getElementById('alertOverlay');
   let alertTotal = 0;
   let alertFirst = null;
+  let alertReasons = new Set();
   function timeText(t) { return t ? t.slice(11, 19) : new Date().toTimeString().slice(0, 8); }
-  function showAlert(count, time) {
+  function showAlert(count, time, reasons = []) {
     const t = timeText(time);
-    if (alertOverlay.hidden) { alertTotal = 0; alertFirst = t; }
+    if (alertOverlay.hidden) { alertTotal = 0; alertFirst = t; alertReasons = new Set(); }
     alertTotal += count;
+    reasons.forEach(r => alertReasons.add(r));
     document.getElementById('alertCount').textContent = `비허가자 ${alertTotal}명이 감지되었습니다`;
+    document.getElementById('alertReason').textContent =
+      alertReasons.size ? '사유: ' + [...alertReasons].join(', ') : '';
     document.getElementById('alertTime').textContent =
       alertFirst === t ? `감지 시각 ${t}` : `처음 감지 ${alertFirst}\n최근 감지 ${t}`;
     if (alertOverlay.hidden) {
@@ -406,6 +500,92 @@
   document.getElementById('alertConfirm').addEventListener('click', () => {
     alertOverlay.hidden = true;
   });
+
+  // ── 관제 상황 시뮬레이션 ──
+  // 서버의 관제 환경(/api/access/env)을 보여 주고, 관리자만 시연 모드로 바꿀 수 있다.
+  // 시연 모드 OFF: 실제 시각 + 카메라 설치 층 / ON + [이 상황 적용]: 가정한 요일·시간·층
+  const DAYS = ['월', '화', '수', '목', '금', '토', '일'];
+  const sim = {
+    switch: document.getElementById('simSwitch'), day: document.getElementById('simDay'),
+    time: document.getElementById('simTime'), floor: document.getElementById('simFloor'),
+    target: document.getElementById('simTarget'), apply: document.getElementById('simApply'),
+    reset: document.getElementById('simReset'), note: document.getElementById('simNote'),
+  };
+  const NOTE = 'ON 시 실제 시각 대신 아래에서 정한 상황을 적용합니다.';
+  let isAdmin = false, simOn = false, dirty = false, lastEnv = null;
+
+  function workText(work) {
+    const days = (work.days || []).join(',') === '0,1,2,3,4' ? '평일' : (work.days || []).map(d => DAYS[d]).join('·');
+    return `${days} ${work.start}~${work.end}`;
+  }
+  function renderEnv(env) {
+    lastEnv = env;
+    if (sim.floor.options.length !== env.floors.length) {
+      sim.floor.innerHTML = env.floors.map(f => `<option value="${Number(f)}">${Number(f)}층</option>`).join('');
+    }
+    if (!dirty) {
+      simOn = env.demo;
+      sim.day.value = String(env.day); sim.time.value = env.time; sim.floor.value = String(env.floor);
+    }
+    const eff = env.effective;
+    sim.switch.classList.toggle('on', simOn);
+    sim.switch.setAttribute('aria-checked', String(simOn));
+    document.getElementById('simLabel').textContent = `시연 모드 ${simOn ? 'ON' : 'OFF'}`;
+    sim.switch.disabled = sim.reset.disabled = !isAdmin;
+    [sim.day, sim.time, sim.floor, sim.target, sim.apply].forEach(el => { el.disabled = !isAdmin || !simOn; });
+
+    const pill = document.getElementById('modePill');
+    pill.className = 'mode-pill' + (env.demo ? '' : ' off');
+    pill.textContent = env.demo ? '시연 모드 적용 중' : '실제 환경 기준';
+    document.getElementById('scenario').classList.toggle('active-sim', env.demo);
+    document.getElementById('simMode').textContent = env.demo ? '◉ 시연 환경 적용' : '● 실제 환경';
+    let context = `${DAYS[eff.day]}요일 · ${eff.time} · ${eff.floor}층`;
+    if (simOn && (dirty || !env.demo)) context += '  (변경 사항은 [이 상황 적용]을 눌러야 반영됩니다)';
+    document.getElementById('simContext').textContent = context;
+    const rule = document.getElementById('simRule');
+    rule.className = eff.after_hours ? 'deny' : 'ok';
+    rule.textContent = eff.after_hours
+      ? `근무시간 외 (${workText(env.work)} 밖) · 등록자도 전원 비허가`
+      : `근무시간 (${workText(env.work)}) · 등록 시 허가한 층만 출입 허가`;
+    const meta = document.getElementById('cam1Meta');
+    meta.textContent = `${eff.floor}층 · ${env.demo ? `시연 ${DAYS[eff.day]} ${eff.time}` : '실제 시각'}`;
+    meta.classList.toggle('sim', env.demo);
+  }
+  async function postEnv(body) {
+    try {
+      const r = await fetch('/api/access/env', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '');
+      dirty = false;
+      sim.note.textContent = NOTE;
+      renderEnv(await r.json());
+    } catch (e) {
+      sim.note.textContent = '변경 실패: ' + (e.message || '관리자 로그인이 필요합니다');
+    }
+  }
+  sim.switch.addEventListener('click', () => {
+    if (!isAdmin) return;
+    simOn = !simOn;
+    if (simOn) { dirty = true; renderEnv(lastEnv); }
+    else postEnv({ demo: false });
+  });
+  [sim.day, sim.time, sim.floor, sim.target].forEach(el => el.addEventListener('change', () => {
+    dirty = true; if (lastEnv) renderEnv(lastEnv);
+  }));
+  sim.apply.addEventListener('click', () => postEnv({
+    demo: true, day: Number(sim.day.value), time: sim.time.value, floor: Number(sim.floor.value),
+  }));
+  sim.reset.addEventListener('click', () => postEnv({ reset: true }));
+  fetch('/api/admin/status').then(r => r.json()).then(s => {
+    isAdmin = !!s.logged_in;
+    if (!isAdmin) sim.note.textContent = NOTE + ' (관리자 로그인 시 변경 가능)';
+    if (lastEnv) renderEnv(lastEnv);
+  }).catch(() => {});
+
+  // 통계 폴링은 위의 모든 선언 뒤에 시작한다.
+  setInterval(updateStats, 1000);
+  updateStats();
 </script>
 
 </body>

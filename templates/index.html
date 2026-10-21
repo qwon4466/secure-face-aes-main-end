@@ -39,6 +39,9 @@
         #mainScreen { display: none; text-align: center; }
         video, img { border: 3px solid #7289da; border-radius: 10px; margin-bottom: 20px; background-color: #000; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
         .controls { display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; }
+        .floor-controls { align-items: center; font-size: 16px; margin-top: -8px; }
+        .floor-label { font-weight: bold; color: #475569; }
+        #floorChecks label { margin: 0 6px; cursor: pointer; }
         /* 인풋 창 밝게 변경 */
         input[type="text"], select { 
             padding: 10px; font-size: 16px; border-radius: 5px; border: 1px solid #cccccc; background-color: #ffffff; color: #333333;
@@ -108,6 +111,10 @@
                 <option value="비허가">비허가 (Denied)</option>
             </select>
         </div>
+        <div class="controls floor-controls">
+            <span class="floor-label">출입 허가 층</span>
+            <span id="floorChecks"></span>
+        </div>
 
         <div id="instructionText">정면을 본 상태로 아래 버튼을 눌러주세요.</div>
 
@@ -145,7 +152,23 @@
             document.getElementById('mainScreen').style.display = 'block';
                 document.getElementById('welcomeMessage').innerText = "환영합니다, 관리자님!";
             startCamera();
+            loadFloors();
         });
+
+        // 건물 층 목록(config.ACCESS_FLOORS)으로 허가 층 체크박스 생성. 기본은 전체 층.
+        async function loadFloors() {
+            let floors = [1, 2, 3];
+            try { floors = (await fetch('/api/access/env').then(r => r.json())).floors || floors; } catch (e) {}
+            document.getElementById('floorChecks').innerHTML = floors.map(f =>
+                `<label><input type="checkbox" class="floor-check" value="${Number(f)}" checked> ${Number(f)}층</label>`
+            ).join('');
+        }
+        function selectedFloors() {
+            return [...document.querySelectorAll('.floor-check:checked')].map(el => Number(el.value));
+        }
+        function setFloorsDisabled(disabled) {
+            document.querySelectorAll('.floor-check').forEach(el => { el.disabled = disabled; });
+        }
 
         async function logout() {
             try { await fetch('/api/admin/logout', { method: 'POST' }); } catch (e) {}
@@ -169,10 +192,13 @@
             const group = document.getElementById('groupSelect').value;
 
             if (!name) { alert("이름을 먼저 입력해주세요!"); return; }
+            const floors = selectedFloors();
+            if (!floors.length) { alert("출입 허가 층을 하나 이상 선택해주세요!"); return; }
 
             // 1. UI 상태 변경 (입력 차단 및 안내 문구 수정)
             nameInput.disabled = true;
             document.getElementById('groupSelect').disabled = true;
+            setFloorsDisabled(true);
             captureBtn.disabled = true;
             captureBtn.innerText = "촬영 진행 중...";
             
@@ -198,7 +224,7 @@
             fetch('/api/register_continuous_realsense', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: name, group: group })
+                body: JSON.stringify({ name: name, group: group, floors: floors })
             })
             .then(response => response.json())
             .then(data => {
@@ -241,6 +267,7 @@
         function resetForNewPerson() {
             nameInput.disabled = false;
             document.getElementById('groupSelect').disabled = false;
+            setFloorsDisabled(false);
             nameInput.value = "";
             
             instructionText.innerText = "정면을 본 상태로 아래 버튼을 눌러주세요.";
