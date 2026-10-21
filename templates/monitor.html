@@ -98,6 +98,10 @@
     .sim-btn { border: 1px solid #DBE4F0; background: #fff; color: #48607F; border-radius: 7px; padding: 8px 12px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
     .sim-btn.primary { background: #3B82F6; color: #fff; border-color: #3B82F6; }
     .sim-btn:disabled { opacity: .5; cursor: not-allowed; }
+    a.sim-btn { text-decoration: none; display: inline-block; }
+    .sim-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .sim-actions [hidden] { display: none; }
+    .login-need { font-size: 12px; color: #A66B0A; font-weight: 600; }
     .scenario-body { padding: 15px 17px; display: grid; grid-template-columns: 175px 1fr; gap: 22px; align-items: start; }
     .switchline { padding-top: 6px; display: flex; gap: 10px; align-items: center; font-weight: 650; font-size: 13px; }
     .switch { width: 39px; height: 23px; background: #CAD4E2; border-radius: 20px; position: relative; cursor: pointer; border: 0; padding: 0; flex-shrink: 0; }
@@ -313,7 +317,11 @@
       <svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
       관제 상황 시뮬레이션 <small>현재 요일·시간·층을 가정하여 출입 판정을 시연합니다.</small>
     </div>
-    <button type="button" class="sim-btn" id="simReset">기본값 복원</button>
+    <div class="sim-actions">
+      <span class="login-need" id="simLoginNeed" hidden>설정을 바꾸려면 관리자 로그인이 필요합니다</span>
+      <a class="sim-btn primary" id="simLogin" href="/admin/login?next=/" hidden>관리자 로그인</a>
+      <button type="button" class="sim-btn" id="simReset">기본값 복원</button>
+    </div>
   </div>
   <div class="scenario-body">
     <div>
@@ -559,6 +567,9 @@
     sim.switch.setAttribute('aria-checked', String(simOn));
     document.getElementById('simLabel').textContent = `시연 모드 ${simOn ? 'ON' : 'OFF'}`;
     sim.switch.disabled = sim.reset.disabled = !isAdmin;
+    // 서버 재시작 등으로 로그인이 풀리면 잠긴 이유와 로그인 버튼을 보여 준다.
+    document.getElementById('simLogin').hidden = isAdmin;
+    document.getElementById('simLoginNeed').hidden = isAdmin;
     [sim.day, sim.time, sim.floor, sim.target, sim.apply].forEach(el => { el.disabled = !isAdmin || !simOn; });
 
     const pill = document.getElementById('modePill');
@@ -609,6 +620,7 @@
       const r = await fetch('/api/access/env', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
+      if (r.status === 401) { loggedOut(); return; }
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '입력값을 확인하세요');
       workDirty = false;
@@ -623,9 +635,10 @@
       const r = await fetch('/api/access/env', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
+      if (r.status === 401) { loggedOut(); return; }
       if (!r.ok) {
         const detail = (await r.json().catch(() => ({}))).detail;
-        throw new Error(typeof detail === 'string' ? detail : (r.status === 401 ? '' : '입력값을 확인하세요'));
+        throw new Error(typeof detail === 'string' ? detail : '입력값을 확인하세요');
       }
       dirty = false;
       sim.note.textContent = NOTE;
@@ -647,9 +660,12 @@
     demo: true, day: Number(sim.day.value), time: sim.time.value, floor: Number(sim.floor.value),
   }));
   sim.reset.addEventListener('click', () => postEnv({ reset: true }));
+  function loggedOut() {
+    isAdmin = false; simOn = false; dirty = false; workDirty = false;
+    if (lastEnv) renderEnv(lastEnv);
+  }
   fetch('/api/admin/status').then(r => r.json()).then(s => {
     isAdmin = !!s.logged_in;
-    if (!isAdmin) sim.note.textContent = NOTE + ' (관리자 로그인 시 변경 가능)';
     if (lastEnv) renderEnv(lastEnv);
   }).catch(() => {});
 

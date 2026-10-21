@@ -82,7 +82,7 @@
 
         function nextUrl() {
             const p = new URLSearchParams(location.search).get('next');
-            if (p === '/register' || p === '/employees' || p === '/audit') return p;
+            if (p === '/' || p === '/register' || p === '/employees' || p === '/audit') return p;
             return '/employees';
         }
 
