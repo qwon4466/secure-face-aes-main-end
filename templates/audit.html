@@ -69,10 +69,10 @@
 
     <div class="panel">
       <div class="panel-title"><svg class="ui-icon" aria-hidden="true"><use href="#icon-alert"></use></svg> 비허가자 감지 이력</div>
-      <div class="panel-sub">등록되지 않은 인원(비허가자)이 감지된 이벤트입니다.</div>
+      <div class="panel-sub">미등록 인원, 또는 시간·층 출입 통제로 출입이 거부된 등록자가 감지된 이벤트입니다.</div>
       <table>
-        <thead><tr><th>시각</th><th>구분</th><th>유사도</th></tr></thead>
-        <tbody id="detectBody"><tr><td colspan="3" class="empty">불러오는 중...</td></tr></tbody>
+        <thead><tr><th>시각</th><th>대상</th><th>사유</th><th>유사도</th></tr></thead>
+        <tbody id="detectBody"><tr><td colspan="4" class="empty">불러오는 중...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -101,10 +101,11 @@
         tb.innerHTML = d.length ? d.map(e => `
           <tr>
             <td>${fmt(e.time)}</td>
-            <td><span class="badge b-warn">${esc(e.group || '비허가')}</span></td>
+            <td>${!e.name || e.name === 'Unknown' ? '미등록' : esc(e.name)}</td>
+            <td><span class="badge b-warn">${esc(e.reason || e.group || '비허가')}</span></td>
             <td>${e.sim == null ? '-' : esc(e.sim)}</td>
-          </tr>`).join('') : '<tr><td colspan="3" class="empty">감지 이력이 없습니다.</td></tr>';
-      } catch { document.getElementById('detectBody').innerHTML = '<tr><td colspan="3" class="empty">불러오기 실패</td></tr>'; }
+          </tr>`).join('') : '<tr><td colspan="4" class="empty">감지 이력이 없습니다.</td></tr>';
+      } catch { document.getElementById('detectBody').innerHTML = '<tr><td colspan="4" class="empty">불러오기 실패</td></tr>'; }
     }
     load();
     setInterval(load, 5000);

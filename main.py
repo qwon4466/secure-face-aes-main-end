@@ -53,6 +53,7 @@ import event_log
 
 from core.selective_camera import MainCamera as CameraProcessor, DB_PATH, _adapt_array, _convert_array
 from core.selective_recognition import stable_person_id
+from core.access_policy import parse_floors, stored_floors
 from core.selective_routes import create_router as create_selective_router
 from core.selective_index import completed as completed_selective, find as find_selective
 
@@ -71,8 +72,9 @@ camera.gallery_path = DB_PATH
 if not camera.operational:
     # 테스트 실행(SRX_TEST_MODE / SRX_DATA_ROOT)의 감사 기록은 그 데이터 폴더에만 남긴다.
     event_log.set_log_dir(camera.root / "logs")
-camera.on_alert = lambda face: event_log.log_detection(
-    "Unknown", "비허가", face.get("similarity"), track=face.get("track_id"))
+camera.on_alert = lambda face, person: event_log.log_detection(
+    person or "Unknown", "비허가", face.get("similarity"),
+    track=face.get("track_id"), reason=face.get("access_reason"))
 
 # AES 원본 복원은 전용 worker에서 실행한다. 단일 worker로 CPU 경쟁을
 # 제한하면서도 FastAPI event loop와 HTTP 요청을 점유하지 않는다.
@@ -94,6 +96,13 @@ def _init_db():
             image_path TEXT NOT NULL,
             vector     array NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # 사원별 출입 허가 층 ('1,3'). 행이 없는 사원(기능 도입 전 등록)은 전체 층 허가.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS person_access (
+            name   TEXT PRIMARY KEY,
+            floors TEXT NOT NULL
         )
     """)
     conn.commit()
@@ -468,16 +477,94 @@ async def api_debug():
     return camera.get_debug_info()
 
 
+# ── 출입 허가 층 ──────────────────────────────────────────────────────────
+def _access_floors(conn) -> dict:
+    rows = conn.execute("SELECT name, floors FROM person_access").fetchall()
+    return {name: stored_floors(floors, camera.access_floors) for name, floors in rows}
+
+
+def _save_access(conn, name: str, floors: list):
+    conn.execute(
+        "INSERT INTO person_access (name, floors) VALUES (?, ?) "
+        "ON CONFLICT(name) DO UPDATE SET floors = excluded.floors",
+        (stable_person_id(name), ",".join(map(str, floors))),
+    )
+
+
+def _register_floors(floors) -> list:
+    """등록 요청의 허가 층. 지정하지 않으면 전체 층."""
+    return parse_floors(camera.access_floors if floors is None else floors, camera.access_floors)
+
+
 # ── API — 사원 목록 ───────────────────────────────────────────────────────
 @app.get("/api/users", dependencies=[Depends(require_admin)])
 async def api_users():
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT name, auth_group FROM users").fetchall()
+    rows = conn.execute("SELECT name, auth_group FROM users ORDER BY id").fetchall()
+    access = _access_floors(conn)
     conn.close()
     seen = {}
     for stored_name, group in rows:
         seen[stable_person_id(stored_name)] = group
-    return [{"name": k, "group": v} for k, v in seen.items()]
+    return [{"name": k, "group": v, "floors": access.get(k, camera.access_floors)}
+            for k, v in seen.items()]
+
+
+# ── API — 가상 환경 (시간·층 출입 통제) ───────────────────────────────────
+class WorkHours(BaseModel):
+    days: list[int]             # 0=월 … 6=일
+    start: str                  # "HH:MM"
+    end: str
+
+
+class AccessEnvUpdate(BaseModel):
+    demo: bool | None = None
+    day: int | None = None      # 0=월 … 6=일
+    time: str | None = None     # "HH:MM"
+    floor: int | None = None
+    work: WorkHours | None = None   # 근무시간 (이 밖에서는 등록자도 비허가)
+    reset: bool = False
+
+
+@app.get("/api/access/env")
+async def api_access_env():
+    return camera.access_env.get()
+
+
+@app.post("/api/access/env", dependencies=[Depends(require_admin)])
+async def api_set_access_env(data: AccessEnvUpdate):
+    try:
+        if data.reset:
+            return camera.access_env.reset()
+        return camera.access_env.update(data.demo, data.day, data.time, data.floor,
+                                        data.work.model_dump() if data.work else None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class FloorsUpdate(BaseModel):
+    floors: list[int]
+
+
+@app.put("/api/users/{name}/floors", dependencies=[Depends(require_admin)])
+async def api_update_floors(name: str, data: FloorsUpdate):
+    """등록된 사원의 출입 허가 층 수정."""
+    try:
+        floors = _register_floors(data.floors)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        stored = [row[0] for row in conn.execute("SELECT name FROM users")]
+        if not any(stable_person_id(n) == name for n in stored):
+            raise HTTPException(status_code=404, detail="사원을 찾을 수 없습니다.")
+        _save_access(conn, name, floors)
+        conn.commit()
+    finally:
+        conn.close()
+    if camera:
+        camera.reload_people()
+    return {"status": "ok", "name": name, "floors": floors}
 
 
 # ── API — DB 재로드 ───────────────────────────────────────────────────────
@@ -496,6 +583,7 @@ async def api_delete_user(name: str):
         "DELETE FROM users WHERE name LIKE ?", (f"{name}_%",)
     )
     deleted = cur.rowcount
+    conn.execute("DELETE FROM person_access WHERE name = ?", (name,))
     conn.commit()
     conn.close()
     if deleted == 0:
@@ -510,15 +598,21 @@ class RegisterData(BaseModel):
     name: str
     group: str
     image_base64: str
+    floors: list[int] | None = None
 
 
 class RegisterCapture(BaseModel):
     name: str
     group: str
+    floors: list[int] | None = None
 
 
-def _do_register(frame, name: str, group: str) -> dict:
+def _do_register(frame, name: str, group: str, floors=None) -> dict:
     """단일 프레임으로 얼굴 탐지 → 각도 판별 → DB 등록."""
+    try:
+        floors = _register_floors(floors)
+    except ValueError as e:
+        return {"status": "error", "message": f"❌ {e}"}
     if frame is None:
         return {"status": "error", "message": "❌ 카메라 프레임이 없습니다."}
 
@@ -562,6 +656,7 @@ def _do_register(frame, name: str, group: str) -> dict:
         "INSERT INTO users (name, auth_group, image_path, vector) VALUES (?,?,?,?)",
         (f"{name}_{tag}", group, fpath, emb),
     )
+    _save_access(conn, name, floors)
     conn.commit()
     conn.close()
 
@@ -580,7 +675,7 @@ async def api_register(data: RegisterData):
             np.frombuffer(base64.b64decode(encoded), np.uint8),
             cv2.IMREAD_COLOR,
         )
-        return _do_register(frame, data.name, data.group)
+        return _do_register(frame, data.name, data.group, data.floors)
     except Exception as e:
         return {"status": "error", "message": f"서버 오류: {e}"}
 
@@ -592,7 +687,7 @@ async def api_register_capture(data: RegisterCapture):
         if camera is None:
             return {"status": "error", "message": "서버 초기화 중입니다. 잠시 후 시도하세요."}
         frame = camera.capture_raw_frame()
-        return _do_register(frame, data.name, data.group)
+        return _do_register(frame, data.name, data.group, data.floors)
     except Exception as e:
         return {"status": "error", "message": f"서버 오류: {e}"}
 
@@ -600,6 +695,7 @@ async def api_register_capture(data: RegisterCapture):
 class RegisterContinuous(BaseModel):
     name: str
     group: str
+    floors: list[int] | None = None
 
 @app.post("/api/register_continuous_realsense", dependencies=[Depends(require_admin)])
 async def api_register_continuous_realsense(data: RegisterContinuous):
@@ -609,6 +705,10 @@ async def api_register_continuous_realsense(data: RegisterContinuous):
     """
     if camera is None:
         return {"status": "error", "message": "서버 초기화 중입니다. 잠시 후 시도하세요."}
+    try:
+        floors = _register_floors(data.floors)
+    except ValueError as e:
+        return {"status": "error", "message": f"❌ {e}"}
 
     print(f"▶ [{data.name}] 연속 촬영 등록 시작...")
     
@@ -656,7 +756,9 @@ async def api_register_continuous_realsense(data: RegisterContinuous):
             
             # 다음 캡처까지 대기 (비동기 딜레이)
             await asyncio.sleep(interval)
-            
+
+        if valid_faces > 0:
+            _save_access(conn, data.name, floors)
         conn.commit()
     except Exception as e:
         conn.rollback()

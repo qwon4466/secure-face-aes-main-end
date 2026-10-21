@@ -120,6 +120,13 @@
     .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
     .modal-desc { font-size: 13px; color: #64748B; margin-bottom: 24px; line-height: 1.6; }
     .modal-footer { display: flex; gap: 8px; justify-content: flex-end; }
+    .floor-options { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    .floor-options label {
+      display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+      border: 1px solid #E2E8F0; border-radius: 8px; font-size: 13px; cursor: pointer;
+    }
+    .floor-options label:has(input:checked) { border-color: #93C5FD; background: #EFF6FF; color: #2563EB; }
+    .floor-error { min-height: 18px; font-size: 12px; color: #DC2626; margin-bottom: 14px; }
 
     /* ── 통계 칩 ── */
     .stat-row {
@@ -213,12 +220,13 @@
         <tr>
           <th>사원</th>
           <th>그룹</th>
+          <th>출입 허가 층</th>
           <th>등록 각도</th>
           <th></th>
         </tr>
       </thead>
       <tbody id="empTable">
-        <tr><td colspan="4">
+        <tr><td colspan="5">
           <div class="empty-state">
             <div class="empty-icon">⏳</div>
             <div class="empty-text">로딩 중...</div>
@@ -245,12 +253,29 @@
   </div>
 </div>
 
+<!-- 출입 허가 층 수정 모달 -->
+<div class="modal-backdrop" id="floorModal">
+  <div class="modal">
+    <div class="modal-title">출입 허가 층 수정</div>
+    <div class="modal-desc"><strong id="floorName"></strong> 사원이 출입할 수 있는 층을 선택하세요.</div>
+    <div class="floor-options" id="floorOptions"></div>
+    <div class="floor-error" id="floorError"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeFloorModal()">취소</button>
+      <button class="btn btn-primary" id="floorSaveBtn" onclick="saveFloors()">저장</button>
+    </div>
+  </div>
+</div>
+
 <!-- 토스트 -->
 <div class="toast-container" id="toastContainer"></div>
 
 <script>
   let allEmployees = [];
+  let shownEmployees = [];
   let pendingDeleteName = null;
+  let editingFloorsName = null;
+  let buildingFloors = [1, 2, 3];
 
   // ── 데이터 로드 ──
   async function loadEmployees() {
@@ -272,8 +297,9 @@
 
   function renderTable(list) {
     const tbody = document.getElementById('empTable');
+    shownEmployees = list;
     if (list.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="4">
+      tbody.innerHTML = `<tr><td colspan="5">
         <div class="empty-state">
           <div class="empty-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-user"></use></svg></div>
           <div class="empty-text">등록된 사원이 없습니다.<br><a href="/register" style="color:#3B82F6">사원 등록</a>으로 추가하세요.</div>
@@ -288,7 +314,7 @@
       if (!angleMap[e.name]) angleMap[e.name] = {group: e.group, angles: []};
     });
 
-    tbody.innerHTML = list.map(e => {
+    tbody.innerHTML = list.map((e, i) => {
       const initial = (e.name || '?')[0].toUpperCase();
       const groupClass = 'group-' + (e.group || 'default');
       return `<tr>
@@ -299,8 +325,10 @@
           </div>
         </td>
         <td><span class="group-badge ${groupClass}">${e.group || '-'}</span></td>
+        <td style="font-size:13px">${(e.floors || []).map(f => Number(f) + '층').join(', ') || '-'}</td>
         <td style="color:#64748B;font-size:13px">정면 · 좌측면 · 우측면</td>
         <td style="text-align:right">
+          <button class="btn btn-ghost btn-sm" onclick="openFloorModal(${i})">층 수정</button>
           <button class="btn btn-danger btn-sm" onclick="openDelModal('${e.name}')">삭제</button>
         </td>
       </tr>`;
@@ -317,6 +345,53 @@
   }
 
   // ── 삭제 모달 ──
+  // ── 출입 허가 층 수정 ──
+  function openFloorModal(index) {
+    const e = shownEmployees[index];
+    if (!e) return;
+    editingFloorsName = e.name;
+    document.getElementById('floorName').textContent = e.name;
+    document.getElementById('floorError').textContent = '';
+    const current = new Set((e.floors || []).map(Number));
+    const box = document.getElementById('floorOptions');
+    box.innerHTML = '';
+    buildingFloors.forEach(f => {
+      const label = document.createElement('label');
+      const input = document.createElement('input');
+      input.type = 'checkbox'; input.value = f; input.checked = current.has(Number(f));
+      label.append(input, ` ${f}층`);
+      box.appendChild(label);
+    });
+    document.getElementById('floorModal').classList.add('open');
+  }
+  function closeFloorModal() {
+    document.getElementById('floorModal').classList.remove('open');
+    editingFloorsName = null;
+  }
+  async function saveFloors() {
+    const floors = [...document.querySelectorAll('#floorOptions input:checked')].map(el => Number(el.value));
+    if (!floors.length) {
+      document.getElementById('floorError').textContent = '출입 허가 층을 하나 이상 선택하세요.';
+      return;
+    }
+    const btn = document.getElementById('floorSaveBtn');
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(editingFloorsName)}/floors`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ floors }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || '저장 실패');
+      showToast(`${editingFloorsName} 허가 층: ${floors.map(f => f + '층').join(', ')}`, 'success');
+      closeFloorModal();
+      loadEmployees();
+    } catch (err) {
+      document.getElementById('floorError').textContent = err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  fetch('/api/access/env').then(r => r.json()).then(env => { buildingFloors = env.floors || buildingFloors; }).catch(() => {});
+
   function openDelModal(name) {
     pendingDeleteName = name;
     document.getElementById('delName').textContent = name;

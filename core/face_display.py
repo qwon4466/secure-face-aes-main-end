@@ -24,8 +24,10 @@ def annotate(frame,faces):
     font=korean_font(); image=Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
     draw=ImageDraw.Draw(image);w,h=image.size
     for face in faces:
-        allowed=face.get('authorized',face.get('group')=='internal')
-        text='허가자' if allowed else '비허가자'
+        # allowed: 시간·층 출입 판정. 판정이 없는 얼굴은 인식 결과로 표시한다.
+        allowed=face.get('allowed',face.get('authorized',face.get('group')=='internal'))
+        reason=face.get('access_reason','')
+        text='허가자' if allowed else ('비허가자 · '+reason if reason and reason!='미등록' else '비허가자')
         color=(0,255,0) if allowed else (255,0,0)
         x1,y1,x2,y2=face['bbox']
         draw.rectangle((x1,y1,min(w-1,x2),min(h-1,y2)),outline=color,width=2)

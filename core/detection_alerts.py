@@ -33,7 +33,8 @@ class AlertTracker:
             if track in self.alerted:
                 self.alerted[track] = (bbox, now)
                 continue
-            if face.get('authorized', False):
+            # allowed: 출입 판정(시간·층 반영). 판정 전 얼굴은 인식 여부로 대신한다.
+            if face.get('allowed', face.get('authorized', False)):
                 self.pending.pop(track, None)
                 continue
             if any(now - last <= self.rearm and _overlaps(bbox, old)

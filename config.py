@@ -88,6 +88,16 @@ FACE_AUTH_HOLD_SECONDS = 0.8
 # 같은 자리에서 이 시간 안에 다시 잡힌 얼굴은 같은 사람으로 보고 다시 알리지 않음
 DETECT_ALERT_CONFIRM_SECONDS = 1.0
 DETECT_ALERT_REARM_SECONDS = 5.0
+# 시간·층별 출입 통제(화면 표시·알림 전용)
+# 건물 층 목록. 등록 시 이 중 허가 층을 고른다.
+ACCESS_FLOORS = [1, 2, 3]
+# 카메라가 설치된 층 (시연 모드가 꺼져 있을 때 적용)
+ACCESS_CAMERA_FLOOR = 1
+# 근무시간 초기값: 요일(0=월 … 6=일)과 시각. 이 밖에서는 등록자도 모두 비허가로 표시·알림.
+# 실제 값은 모니터 화면의 [근무시간 설정]에서 바꾸며 데이터 폴더의 access_env.json에 저장된다.
+WORK_DAYS = [0, 1, 2, 3, 4]
+WORK_START = "09:00"
+WORK_END = "18:00"
 SELECTIVE_SOURCE = os.environ.get("SRX_VIDEO_SOURCE", "")  # Empty: CAMERA_DEVICE; otherwise a local video file
 SELECTIVE_MODEL_DIR = os.path.expanduser("~/.insightface/models/buffalo_s")
 SELECTIVE_DETECTOR_PATH = ""  # Optional explicit SCRFD ONNX file
