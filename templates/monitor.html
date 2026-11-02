@@ -481,7 +481,8 @@
       const cameraStatus = document.getElementById('cameraStatus');
       cameraStatus.style.display = ready ? 'none' : 'flex';
       cameraStatus.querySelector('.ph-text').textContent = d.error ||
-        (d.camera_state === 'stale' ? '새 프레임 수신 지연' :
+        (d.camera_state === 'reconnecting' ? '카메라 재연결 중' :
+         d.camera_state === 'stale' ? '새 프레임 수신 지연' :
          d.camera_state === 'stopped' ? '카메라 중지됨' : '카메라 준비 중');
       document.getElementById('stat-emp').textContent = d.employee_count ?? 0;
       // 현재 화면의 비허가자 수 (미등록 + 시간·층 출입 거부)

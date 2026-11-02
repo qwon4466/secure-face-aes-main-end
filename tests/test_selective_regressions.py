@@ -10,7 +10,10 @@ import pytest
 
 from core.selective_camera import MainCamera
 from core.selective_crypto import GROUPS, RestoreError, protect, restore_frames, save_chunk
-from core.selective_recognition import CPUAdapter, stable_person_id
+from core.selective_recognition import (CPUAdapter, Classifier, Policy,
+                                        RegistrationFrameSelector,
+                                        registration_face, stable_person_id,
+                                        valid_embedding)
 
 
 def _vector(value):
@@ -33,6 +36,65 @@ def test_registration_samples_share_stable_person_id(work):
     adapter = CPUAdapter.__new__(CPUAdapter)
     adapter.reload_gallery(db)
     assert [person for person, _ in adapter.users] == ['홍_길동', '홍_길동']
+
+
+def test_gallery_reload_sees_new_wal_commit_and_reports_valid_count(work):
+    db=work/'wal-users.db';writer=sqlite3.connect(db)
+    writer.execute('PRAGMA journal_mode=WAL')
+    writer.execute('CREATE TABLE users (name TEXT, auth_group TEXT, vector BLOB)')
+    writer.execute('INSERT INTO users VALUES (?,?,?)',('first','허가',_vector(1)))
+    writer.commit()
+    adapter=CPUAdapter.__new__(CPUAdapter);adapter.reload_gallery(db)
+    assert len(adapter.users)==1
+    writer.execute('INSERT INTO users VALUES (?,?,?)',('second','허가',_vector(2)))
+    writer.commit();adapter.reload_gallery(db)
+    assert len(adapter.users)==2
+    assert adapter.gallery_info=={'total_rows':2,'valid_embeddings':2,
+                                  'invalid_embeddings':0,'embedding_dimension':512}
+    snapshot_users,snapshot_info=adapter._gallery_snapshot
+    assert snapshot_users is adapter.users and snapshot_info is adapter.gallery_info
+    writer.close()
+
+
+def test_registration_quality_rejects_ambiguous_and_invalid_faces():
+    frame=np.zeros((240,320,3),dtype=np.uint8)
+    box=np.array([[80,40,240,220,.95]],dtype=np.float32)
+    landmarks=np.array([[[120,90],[200,90],[160,130],[130,175],[190,175]]],dtype=np.float32)
+    candidate,reason=registration_face(frame,box,landmarks)
+    assert reason=='' and candidate['pose']=='front'
+    assert valid_embedding(np.ones(512,dtype=np.float32),512)
+    assert not valid_embedding(np.ones(256,dtype=np.float32),512)
+    assert not valid_embedding(np.full(512,np.nan,dtype=np.float32),512)
+    assert not valid_embedding(np.full(512,np.inf,dtype=np.float32),512)
+    assert registration_face(frame,np.repeat(box,2,axis=0),
+                             np.repeat(landmarks,2,axis=0))[1]=='multiple_faces'
+    bad=landmarks.copy();bad[0,2,1]=70
+    assert registration_face(frame,box,bad)[1]=='landmark_geometry_invalid'
+
+
+def test_registration_selector_rejects_duplicate_frame_pose_and_generation():
+    selector=RegistrationFrameSelector(pose_limit=2,pose_delta=.04)
+    assert selector.check_frame(10,1)==''
+    assert selector.check_frame(10,1)=='duplicate_frame'
+    assert selector.accept_pose('front',0.0)
+    assert not selector.accept_pose('front',0.02)
+    assert selector.accept_pose('front',0.08)
+    assert not selector.accept_pose('front',0.2)
+    assert selector.check_frame(11,2)=='camera_generation_changed'
+
+
+def test_tracking_survives_skipped_capture_ids_but_expires_by_time():
+    classifier=Classifier(Policy(internal_streak=3,track_max_seconds=.8))
+    def observation():
+        return [{'bbox':[10,10,80,90],'quality':.99,'similarity':.9,
+                 'identity':'registered','gallery_valid':True}]
+    first=classifier.classify(observation(),10,observed_at=1.0)[0]
+    second=classifier.classify(observation(),14,observed_at=1.2)[0]
+    third=classifier.classify(observation(),21,observed_at=1.4)[0]
+    assert first['track_id']==second['track_id']==third['track_id']
+    assert third['group']=='internal' and third['streak']==3
+    expired=classifier.classify(observation(),22,observed_at=2.3)[0]
+    assert expired['track_id']!=third['track_id'] and expired['streak']==1
 
 
 def test_authorization_hysteresis_and_final_storage_group():
@@ -60,6 +122,26 @@ def test_authorization_hysteresis_and_final_storage_group():
     for _ in range(5):
         face, states = frame('other-person', 0.10, states)
     assert not face['authorized'] and face['group'] == 'external'
+
+
+def test_confirmed_authorization_is_not_transferred_to_new_identity():
+    camera=MainCamera.__new__(MainCamera)
+    camera.config=SimpleNamespace(
+        FACE_AUTH_CONFIRM_MATCHES=2,FACE_AUTH_CONFIRM_WINDOW=3,
+        FACE_AUTH_REVOKE_MISMATCHES=5,FACE_AUTH_HOLD_SECONDS=.8,
+        FACE_AUTH_RETAIN_THRESHOLD=.40,MATCH_THRESHOLD=.45)
+    states={}
+    def apply(identity):
+        observation={'bbox':[0,0,30,30],'identity':identity,'similarity':.9,
+                     'gallery_valid':True,'quality':.99}
+        face=dict(observation,track_id=1)
+        next_states=camera._update_display_authorization([face],[observation],states,1.0)
+        return face,next_states
+    _,states=apply('person-a');authorized,states=apply('person-a')
+    assert authorized['authorized']
+    replacement,states=apply('person-b')
+    assert not replacement['authorized']
+    assert replacement['recognition_failure']=='confirmation_pending'
 
 
 def test_detector_dropout_reuses_bbox_only_inside_hold_window():

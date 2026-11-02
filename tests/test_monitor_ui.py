@@ -10,6 +10,7 @@ def test_monitor_uses_local_svg_icons_and_recovers_stuck_snapshot_request():
     assert 'FRAME_REQUEST_TIMEOUT_MS' in html
     assert 'clearTimeout(timer)' in html
     assert "camera_state === 'stale'" in html
+    assert "camera_state === 'reconnecting'" in html
     for unsupported in ('🔒', '📹', '👤', '🚨', '🔴', '🟢'):
         assert unsupported not in html
 
