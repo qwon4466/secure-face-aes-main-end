@@ -55,6 +55,8 @@
     .stat-icon.camera { color:#3B82F6; }
     .stat-icon.employee { color:#16A34A; }
     .stat-icon.unknown, .stat-icon.recording { color:#DC2626; }
+    .stat-icon.alert-state { color:#3B82F6; }
+    .stat-icon.alert-state.off { color:#94A3B8; }
     .stat-label { font-size: 11px; color: #64748B; font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase; }
     .stat-value { font-size: 22px; font-weight: 700; color: #1E293B; line-height: 1.2; margin-top: 1px; }
     .badge-rec {
@@ -76,6 +78,12 @@
       border-radius: 50%;
       animation: blink 1s infinite;
     }
+    .alert-state-control { display:flex; align-items:center; gap:8px; margin-top:3px; }
+    .alert-state-control .switch { width:36px; height:21px; }
+    .alert-state-control .switch::before { width:15px; height:15px; }
+    .alert-state-control .switch.on::before { left:18px; }
+    .alert-state-text { min-width:24px; font-size:12px; font-weight:700; color:#2563EB; }
+    .alert-state-text.off { color:#64748B; }
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 
     /* ── 관제 상황 시뮬레이션 (시간·층 출입 통제) ── */
@@ -264,6 +272,7 @@
   <symbol id="icon-user" viewBox="0 0 24 24"><circle cx="10" cy="8" r="3"/><path d="M4 19c.5-4 2.5-6 6-6 2 0 3.6.7 4.6 2"/><path d="m16 18 2 2 4-5"/></symbol>
   <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19z"/><path d="M12 9v5"/><path d="M12 17h.01"/></symbol>
   <symbol id="icon-record" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="12" cy="12" r="4"/></symbol>
+  <symbol id="icon-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></symbol>
 </svg>
 <div id="selectiveError" role="status" style="padding:10px;color:#b91c1c"></div>
 
@@ -305,6 +314,16 @@
     <div>
       <div class="stat-label">녹화 상태</div>
       <div><span class="badge-rec" id="recordingBadge" style="display:none">REC</span></div>
+    </div>
+  </div>
+  <div class="stat-card" id="alertStateCard">
+    <div class="stat-icon alert-state" id="alertStateIcon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-bell"></use></svg></div>
+    <div>
+      <div class="stat-label">알림 상태</div>
+      <div class="alert-state-control">
+        <button type="button" class="switch" id="alertSwitch" role="switch" aria-checked="true" aria-label="비허가자 알림"></button>
+        <span class="alert-state-text" id="alertStateText">ON</span>
+      </div>
     </div>
   </div>
   <span class="mode-pill off" id="modePill">실제 환경 기준</span>
@@ -481,7 +500,8 @@
       const cameraStatus = document.getElementById('cameraStatus');
       cameraStatus.style.display = ready ? 'none' : 'flex';
       cameraStatus.querySelector('.ph-text').textContent = d.error ||
-        (d.camera_state === 'stale' ? '새 프레임 수신 지연' :
+        (d.camera_state === 'reconnecting' ? '카메라 재연결 중' :
+         d.camera_state === 'stale' ? '새 프레임 수신 지연' :
          d.camera_state === 'stopped' ? '카메라 중지됨' : '카메라 준비 중');
       document.getElementById('stat-emp').textContent = d.employee_count ?? 0;
       // 현재 화면의 비허가자 수 (미등록 + 시간·층 출입 거부)
@@ -494,7 +514,10 @@
       if (seq > lastAlertSeq) {
         const fresh = (d.recent_alerts || []).filter(e => e.id > lastAlertSeq);
         const latest = fresh[fresh.length - 1];
-        showAlert(seq - lastAlertSeq, latest ? latest.time : null, fresh.map(e => e.reason).filter(Boolean));
+        if (alertsEnabled) {
+          showAlert(seq - lastAlertSeq, latest ? latest.time : null, fresh.map(e => e.reason).filter(Boolean));
+        }
+        // OFF 중 발생한 이벤트도 소비하여 다시 ON일 때 과거 알림을 재생하지 않는다.
         lastAlertSeq = seq;
       }
     } catch {} finally {
@@ -513,11 +536,65 @@
   // ── 비허가자 감지 경고 ──
   // 확인을 누르기 전까지 열려 있고, 그 사이 새로 감지된 인원은 누적해서 보여 준다.
   const alertOverlay = document.getElementById('alertOverlay');
+  const alertSwitch = document.getElementById('alertSwitch');
+  const ALERT_ENABLED_KEY = 'secureface.alerts.enabled';
+  function storedAlertState() {
+    try {
+      const value = localStorage.getItem(ALERT_ENABLED_KEY);
+      return value === 'false' ? false : true;
+    } catch { return true; }
+  }
+  let alertsEnabled = storedAlertState();
+  let alertAudioContext = null;
+  let alertOscillator = null;
   let alertTotal = 0;
   let alertFirst = null;
   let alertReasons = new Set();
+  function stopAlertSound() {
+    if (!alertOscillator) return;
+    try { alertOscillator.stop(); } catch {}
+    alertOscillator = null;
+  }
+  async function playAlertSound() {
+    stopAlertSound();
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+      if (!alertAudioContext) alertAudioContext = new AudioContext();
+      if (alertAudioContext.state === 'suspended') await alertAudioContext.resume();
+      if (!alertsEnabled) return;
+      const oscillator = alertAudioContext.createOscillator();
+      const gain = alertAudioContext.createGain();
+      oscillator.type = 'square'; oscillator.frequency.value = 880;
+      gain.gain.setValueAtTime(0.12, alertAudioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, alertAudioContext.currentTime + 0.55);
+      oscillator.connect(gain); gain.connect(alertAudioContext.destination);
+      oscillator.onended = () => { if (alertOscillator === oscillator) alertOscillator = null; };
+      alertOscillator = oscillator;
+      oscillator.start(); oscillator.stop(alertAudioContext.currentTime + 0.55);
+    } catch { alertOscillator = null; }
+  }
+  function renderAlertState() {
+    alertSwitch.classList.toggle('on', alertsEnabled);
+    alertSwitch.setAttribute('aria-checked', String(alertsEnabled));
+    const text = document.getElementById('alertStateText');
+    text.textContent = alertsEnabled ? 'ON' : 'OFF';
+    text.classList.toggle('off', !alertsEnabled);
+    document.getElementById('alertStateIcon').classList.toggle('off', !alertsEnabled);
+  }
+  function setAlertsEnabled(enabled) {
+    alertsEnabled = !!enabled;
+    try { localStorage.setItem(ALERT_ENABLED_KEY, String(alertsEnabled)); } catch {}
+    renderAlertState();
+    if (!alertsEnabled) {
+      alertOverlay.hidden = true;
+      alertTotal = 0; alertFirst = null; alertReasons = new Set();
+      stopAlertSound();
+    }
+  }
   function timeText(t) { return t ? t.slice(11, 19) : new Date().toTimeString().slice(0, 8); }
   function showAlert(count, time, reasons = []) {
+    if (!alertsEnabled) return;
     const t = timeText(time);
     if (alertOverlay.hidden) { alertTotal = 0; alertFirst = t; alertReasons = new Set(); }
     alertTotal += count;
@@ -531,9 +608,13 @@
       alertOverlay.hidden = false;
       document.getElementById('alertConfirm').focus();
     }
+    playAlertSound();
   }
+  renderAlertState();
+  alertSwitch.addEventListener('click', () => setAlertsEnabled(!alertsEnabled));
   document.getElementById('alertConfirm').addEventListener('click', () => {
     alertOverlay.hidden = true;
+    stopAlertSound();
   });
 
   // ── 관제 상황 시뮬레이션 ──

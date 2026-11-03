@@ -26,6 +26,13 @@ FACE_AUTH_CONFIRM_WINDOW = 3
 FACE_AUTH_REVOKE_MISMATCHES = 5
 FACE_AUTH_HOLD_SECONDS = 0.8
 
+# 신규 얼굴 등록에만 적용되는 품질 하한. 실시간 인식 임계값과 기존
+# MATCH_THRESHOLD는 변경하지 않는다.
+REGISTER_MIN_DET_CONFIDENCE = 0.6
+REGISTER_MIN_FACE_SIZE = 64
+REGISTER_POSE_BUCKET_LIMIT = 8
+REGISTER_POSE_MIN_DELTA = 0.04
+
 # Hailo-8L 가속: SCRFD 탐지는 Hailo에서, ArcFace 인식은 CPU에서 실행.
 # True여도 hailo_platform이 없으면 자동으로 insightface(CPU)로 폴백.
 # ⚠️ Hailo ArcFace는 임베딩 공간이 달라 전환 시 재등록 필요.
@@ -54,6 +61,15 @@ REQUIRE_REALSENSE_RGB = True
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30
+
+# 일시적인 V4L2 read 실패는 재연결 전에 같은 핸들에서 재시도한다. 연속
+# 실패 횟수와 경과 시간이 모두 임계값을 넘은 경우에만 실제 재연결한다.
+CAMERA_FRAME_BUFFER = 2
+CAMERA_RECONNECT_FAILURES = 3
+CAMERA_RECONNECT_GRACE_SECONDS = 0.25
+CAMERA_READ_RETRY_SECONDS = 0.05
+CAMERA_RECONNECT_BACKOFF_INITIAL = 0.5
+CAMERA_RECONNECT_BACKOFF_MAX = 5.0
 
 # 장치 번호 기본값 없음. CAMERA_DEVICE 환경변수 또는 V4L2 자동 탐색.
 # 선택된 경로는 실행 중 공통 관리자가 저장합니다.
