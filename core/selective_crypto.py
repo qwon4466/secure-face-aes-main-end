@@ -120,6 +120,36 @@ def section_bytes(chunk,name,limit=MAX_FILE):
         raise RestoreError('청크 레코드 무결성 오류')
     return data
 
+def section_digest(chunk,name):
+    """Hash a legacy file or packed-container section with bounded memory."""
+    chunk=Path(chunk)
+    _,_,sections=chunk_document(chunk)
+    if sections is None:
+        filename=RAW_NAME if name=='original' else ('protected.avi' if name=='protected' else name+'.gcm')
+        limit=MAX_CHUNK_RAW+16 if name in GROUPS else MAX_FILE
+        fd=os.open(chunk/filename,os.O_RDONLY|os.O_NOFOLLOW)
+        with os.fdopen(fd,'rb') as source:
+            info=os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size>limit:
+                raise RestoreError('파일 누락 / 크기 상한 / 링크 오류')
+            h=hashlib.sha256()
+            for block in iter(lambda:source.read(1024*1024),b''):h.update(block)
+        return h.hexdigest()
+    section=sections[name];remaining=section['length'];h=hashlib.sha256()
+    fd=os.open(chunk/RAW_NAME,os.O_RDONLY|os.O_NOFOLLOW)
+    with os.fdopen(fd,'rb') as source:
+        info=os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode):raise RestoreError('청크 컨테이너 형식 오류')
+        source.seek(section['offset'])
+        while remaining:
+            block=source.read(min(1024*1024,remaining))
+            if not block:raise RestoreError('청크 레코드 길이 오류')
+            remaining-=len(block);h.update(block)
+    actual=h.hexdigest()
+    if actual!=section['sha256']:
+        raise RestoreError('청크 레코드 무결성 오류')
+    return actual
+
 def pack_chunk(stage, raw_metadata, document):
     """Append existing protected and group payloads to the original ciphertext."""
     container=stage/RAW_NAME
@@ -144,27 +174,50 @@ def pack_chunk(stage, raw_metadata, document):
 
 def encrypt_original(stage, frames, master_key, fps, started_at, ended_at):
     """Stream full unblurred BGR frames into a distinct AES-256-GCM payload."""
-    nonce = secrets.token_bytes(12)
-    h,w = frames[0].shape[:2]
-    header = {'version':1, 'algorithm':'AES-256-GCM', 'nonce':b64(nonce),
-              'aad':'secureface-rx/raw-bgr24/v1', 'encrypted_file':RAW_NAME,
-              'frame_count':len(frames), 'fps':fps, 'width':w, 'height':h,
-              'channels':3, 'started_at':started_at.isoformat() if started_at else '',
-              'ended_at':ended_at.isoformat() if ended_at else ''}
-    aad = canonical(header)
-    cipher = Cipher(algorithms.AES(master_key), modes.GCM(nonce)).encryptor()
-    cipher.authenticate_additional_data(aad)
-    path = stage/RAW_NAME
-    fd = os.open(path, os.O_CREAT|os.O_EXCL|os.O_WRONLY, 0o600)
-    with os.fdopen(fd,'wb') as target:
-        for frame in frames:
-            target.write(cipher.update(frame.tobytes()))
-        target.write(cipher.finalize())
-        target.flush(); os.fsync(target.fileno())
-    metadata = header | {'tag':b64(cipher.tag), 'ciphertext_sha256':file_digest(path)}
-    write_new(stage/RAW_META_NAME, canonical(metadata))
-    print(f'[AES] 원본 청크 암호화 완료 | 암호문={RAW_NAME} | 메타데이터={RAW_META_NAME}',flush=True)
-    return metadata
+    writer=_OriginalEncryptor(stage,len(frames),frames[0].shape,master_key,fps,
+                              started_at,ended_at)
+    try:
+        for frame in frames:writer.write(frame)
+        return writer.finish()
+    except BaseException:
+        writer.close()
+        raise
+
+
+class _OriginalEncryptor:
+    """Incremental writer for the unchanged raw AES-256-GCM v1 format."""
+    def __init__(self,stage,frame_count,shape,master_key,fps,started_at,ended_at):
+        nonce=secrets.token_bytes(12);h,w=shape[:2]
+        self.shape=tuple(shape)
+        self.header={'version':1,'algorithm':'AES-256-GCM','nonce':b64(nonce),
+                     'aad':'secureface-rx/raw-bgr24/v1','encrypted_file':RAW_NAME,
+                     'frame_count':frame_count,'fps':fps,'width':w,'height':h,
+                     'channels':3,'started_at':started_at.isoformat() if started_at else '',
+                     'ended_at':ended_at.isoformat() if ended_at else ''}
+        self.cipher=Cipher(algorithms.AES(master_key),modes.GCM(nonce)).encryptor()
+        self.cipher.authenticate_additional_data(canonical(self.header))
+        self.stage=Path(stage);self.path=self.stage/RAW_NAME
+        fd=os.open(self.path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+        self.target=os.fdopen(fd,'wb');self.finished=False
+
+    def write(self,frame):
+        if tuple(frame.shape)!=self.shape:
+            raise RestoreError('청크 중 해상도 변경')
+        self.target.write(self.cipher.update(frame.tobytes()))
+
+    def finish(self):
+        self.target.write(self.cipher.finalize())
+        self.target.flush();os.fsync(self.target.fileno());self.target.close()
+        self.finished=True
+        metadata=self.header|{'tag':b64(self.cipher.tag),
+                              'ciphertext_sha256':file_digest(self.path)}
+        write_new(self.stage/RAW_META_NAME,canonical(metadata))
+        print(f'[AES] 원본 청크 암호화 완료 | 암호문={RAW_NAME} | 메타데이터={RAW_META_NAME}',flush=True)
+        return metadata
+
+    def close(self):
+        if not self.finished and not self.target.closed:self.target.close()
+
 
 def validate_original(chunk, meta):
     _,embedded,sections=chunk_document(chunk)
@@ -184,7 +237,7 @@ def validate_original(chunk, meta):
     raw_length=sections['original']['length'] if sections is not None else path.stat().st_size
     if path.is_symlink() or not path.is_file() or raw_length!=math.prod(shape)*count:
         raise RestoreError('원본 AES 암호문 누락 또는 길이 오류')
-    if digest(section_bytes(chunk,'original'))!=data['ciphertext_sha256'] or digest(canonical(data))!=meta['raw_metadata_sha256']:
+    if section_digest(chunk,'original')!=data['ciphertext_sha256'] or digest(canonical(data))!=meta['raw_metadata_sha256']:
         raise RestoreError('원본 AES 암호문 또는 메타데이터 변조')
     return data
 
@@ -340,9 +393,18 @@ def write_video(path, frames, fps):
             writer.write(frame)
     finally:
         writer.release()
-    decoded = read_video(path, len(frames), [h,w,3])
-    if not all(np.array_equal(a,b) for a,b in zip(frames, decoded)):
-        raise RestoreError('FFV1 BGR 왕복 검증 실패')
+    # Verify one decoded frame at a time.  A full decoded list here used to
+    # overlap both the protected-frame list and the recorder's raw buffer.
+    cap = cv2.VideoCapture(str(path))
+    try:
+        for expected in frames:
+            ok,decoded=cap.read()
+            if not ok or list(decoded.shape)!=[h,w,3] or not np.array_equal(expected,decoded):
+                raise RestoreError('FFV1 BGR 왕복 검증 실패')
+        if cap.read()[0]:
+            raise RestoreError('영상 프레임 수 초과')
+    finally:
+        cap.release()
     with path.open('rb') as f:
         os.fsync(f.fileno())
 
@@ -364,9 +426,13 @@ def read_video(path, count, shape):
 def save_chunk(root, frames, faces, timing, keys, session, fps=10.0, fail_at=None, final_path=None, duration=None, drops=0, started_at=None, ended_at=None):
     if not ID.fullmatch(session) or not 1 <= len(frames) <= (MAX_CHUNK_FRAMES if final_path else MAX_FRAMES) or len(faces) != len(frames) or len(timing) != len(frames):
         raise RestoreError('청크 크기 / 세션 오류')
-    if sum(f.nbytes for f in frames) > (MAX_CHUNK_RAW if final_path else MAX_RAW) or len(set(keys.values())) != 3 or any(len(k)!=32 for k in keys.values()):
+    frame_shape=getattr(frames,'shape',None)
+    if frame_shape is None:frame_shape=frames[0].shape
+    total_nbytes=getattr(frames,'total_nbytes',None)
+    if total_nbytes is None:total_nbytes=sum(f.nbytes for f in frames)
+    if total_nbytes > (MAX_CHUNK_RAW if final_path else MAX_RAW) or len(set(keys.values())) != 3 or any(len(k)!=32 for k in keys.values()):
         raise RestoreError('청크 메모리 상한 또는 키 오류')
-    if any(f.shape != frames[0].shape for f in frames):
+    if not hasattr(frames,'shape') and any(f.shape != frame_shape for f in frames):
         raise RestoreError('청크 중 해상도 변경')
     previous = -1
     for clock in timing:
@@ -382,27 +448,38 @@ def save_chunk(root, frames, faces, timing, keys, session, fps=10.0, fail_at=Non
     stage = private_dir(final.parent / ('.'+final.name+'.partial' if final_path else '.partial-' + chunk_id))
     protected, raw = [], {g: [] for g in GROUPS}
     metadata = []
-    for i,(frame, detections, clock) in enumerate(zip(frames, faces, timing)):
-        p, masks, records = protect(frame, detections)
-        protected.append(p)
-        metadata.append({**clock, 'stored_index':i, 'pts':i, 'faces':records,
-                         'masks':{g:runs(masks[g]) for g in GROUPS}})
-        for g in GROUPS:
-            raw[g].append(frame[masks[g]].tobytes())
+    original_writer=_OriginalEncryptor(stage,len(frames),frame_shape,keys['master'],fps,
+                                       started_at,ended_at)
+    try:
+        for i,(frame, detections, clock) in enumerate(zip(frames, faces, timing)):
+            original_writer.write(frame)
+            p, masks, records = protect(frame, detections)
+            protected.append(p)
+            metadata.append({**clock, 'stored_index':i, 'pts':i, 'faces':records,
+                             'masks':{g:runs(masks[g]) for g in GROUPS}})
+            for g in GROUPS:
+                raw[g].append(frame[masks[g]].tobytes())
+        raw_metadata=original_writer.finish()
+    except BaseException:
+        original_writer.close()
+        raise
     write_video(stage/'protected.avi', protected, fps)
+    protected_sha256=file_digest(stage/'protected.avi')
+    # Protected frames are reproducible from the encrypted originals and masks;
+    # release this full-size list before group payload encryption and packing.
+    protected.clear()
     if fail_at == 'video':
         raise OSError('injected interrupted save')
-    raw_metadata=encrypt_original(stage,frames,keys['master'],fps,started_at,ended_at)
     meta = {'signing_public':b64(signer.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)),
             'version':1,'session':session,'chunk':chunk_id,'complete':True,
             'raw_metadata_sha256':digest(canonical(raw_metadata)),
-            'shape':list(frames[0].shape),'color':'BGR24','codec':'FFV1',
+            'shape':list(frame_shape),'color':'BGR24','codec':'FFV1',
             'fps':fps,'duration_seconds':duration or len(frames)/fps,'dropped_frames':drops,
             'started_at':started_at.isoformat() if started_at else '',
             'ended_at':ended_at.isoformat() if ended_at else '',
             'time_base':[1,int(round(fps*1000))], 'pts_scale':1000,
             'blur':{'algorithm':'adaptive-reduced-gaussian','min_kernel':display_config.SELECTIVE_BLUR_MIN_KERNEL,'face_ratio':display_config.SELECTIVE_BLUR_FACE_RATIO,'work_size':display_config.SELECTIVE_BLUR_WORK_SIZE,'expansion_ratio':display_config.SELECTIVE_BLUR_EXPANSION_RATIO,'expansion':0,'guard':GUARD,'outside_write_halo':0},
-            'frames':metadata,'protected_sha256':digest((stage/'protected.avi').read_bytes())}
+            'frames':metadata,'protected_sha256':protected_sha256}
     envelopes, deks = {}, {}
     for g in GROUPS:
         # Fresh DEK every attempt, one payload encryption per DEK. Never resume partial encryption.
@@ -477,7 +554,7 @@ def inspect_chunk(chunk):
         masks.append(m)
     if set(manifest['envelopes'])!=set(GROUPS) or set(doc['seals'])!=set(GROUPS):
         raise RestoreError('집단 목록 오류')
-    if digest(section_bytes(chunk,'protected')) != meta['protected_sha256']:
+    if section_digest(chunk,'protected') != meta['protected_sha256']:
         raise RestoreError('보호 영상 해시 불일치: 원래 파일만 허용됩니다')
     validate_original(chunk,meta)
     for g,e in manifest['envelopes'].items():
@@ -489,7 +566,7 @@ def inspect_chunk(chunk):
         actual=sections[g]['length'] if sections is not None else (chunk/(g+'.gcm')).stat().st_size
         if actual != expected:
             raise RestoreError('암호문 크기 오류')
-        if digest(section_bytes(chunk,g,MAX_CHUNK_RAW+16)) != e['sha256']:
+        if section_digest(chunk,g) != e['sha256']:
             raise RestoreError('암호문 해시 불일치')
     return doc, masks
 

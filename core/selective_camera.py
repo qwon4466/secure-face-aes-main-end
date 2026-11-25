@@ -7,6 +7,8 @@ import shutil
 import threading
 import time
 import traceback
+import queue
+import resource
 from collections import deque
 import cv2
 import numpy as np
@@ -47,6 +49,10 @@ class MainCamera:
         self.keys=keyset(self.keydir)
         self.chunks=self.root if self.operational else private_dir(self.root/'chunks')
         self.lock=threading.RLock();self.thread=None;self.stop_event=threading.Event()
+        self.inference_lock=threading.RLock()
+        queue_size=int(getattr(config,'CAMERA_FRAME_BUFFER',2))
+        self.frame_queue=queue.Queue(maxsize=max(1,min(queue_size,8)))
+        self.reader_thread=None
         self.preview=None;self.raw=None;self.detector=None;self.recognizer=None;self.adapter=None
         self.error=None;self.faces=[];self.metrics={};self.running=False;self.recorder=None
         # 비허가자 감지 이벤트: 모니터 팝업(alert_seq/recent_alerts)과 감지 이력(on_alert)에 사용
@@ -61,7 +67,14 @@ class MainCamera:
         self.people={}
         self.model_backend='initializing'
         self.last_preview_at=None;self.frame_sequence=0
-        self.last_read_ms=0.0;self.last_process_ms=0.0
+        self.last_read_ms=0.0;self.last_ai_ms=0.0;self.last_process_ms=0.0
+        self.camera_state='starting';self.camera_generation=0
+        self.camera_frames_received=0;self.camera_buffer_drops=0
+        self.ai_frames_processed=0;self.recording_frames_accepted=0
+        self.camera_reconnect_count=0;self.camera_reconnect_successes=0
+        self.last_camera_error=None;self.last_reconnect_seconds=None
+        self._perf_started=time.monotonic();self._cpu_sample_at=self._perf_started
+        self._cpu_sample_value=time.process_time();self._cpu_percent=0.0
 
     def _alert_tracker(self):
         return AlertTracker(getattr(self.config,'DETECT_ALERT_CONFIRM_SECONDS',1.0),
@@ -115,6 +128,8 @@ class MainCamera:
         if self.adapter is not None and not self.test:
             self.adapter.reload_gallery(self.gallery_path)
         self._load_people()
+        return (dict(getattr(self.adapter,'gallery_info',{}))
+                if self.adapter is not None else {})
 
     def reload_people(self):
         """얼굴 벡터는 그대로 두고 그룹·허가 층만 다시 읽는다 (허가 층 수정 시)."""
@@ -158,7 +173,9 @@ class MainCamera:
     def start(self):
         with self.lock:
             if self.thread and self.thread.is_alive():return
-            self.stop_event.clear();self.running=True;self.error=None
+            self.stop_event.clear();self._clear_frame_queue()
+            self.reader_thread=None;self.running=True;self.error=None
+            self.camera_state='starting'
             self.thread=threading.Thread(target=self._loop,name='selective-camera',daemon=True)
             self.thread.start()
 
@@ -191,6 +208,9 @@ class MainCamera:
                 # revoke authorization state.
                 face['authorized']=bool(state.get('authorized',False))
                 face['group']='internal' if face['authorized'] else 'external'
+                face['match_count']=int(state.get('matches',0))
+                face['recognition_confirmed']=face['authorized']
+                face['recognition_failure']='detector_hold'
                 next_states[track]=state
                 continue
 
@@ -202,6 +222,11 @@ class MainCamera:
                     state['identity']=identity
                     state['history']=[]
                     state['matches']=0
+                    # Never transfer an already-authorized track to a newly
+                    # matched identity occupying the same image region.
+                    state['authorized']=False
+                    state['hold_until']=0.0
+                    state['misses']=0
                 history=list(state.get('history',[]))[-window+1:]
                 history.append(1)
                 state['history']=history
@@ -239,6 +264,20 @@ class MainCamera:
             # operational third bucket that could make selective restore skip
             # an otherwise visible face.
             face['group']='internal' if face['authorized'] else 'external'
+            face['match_count']=int(state.get('matches',0))
+            face['recognition_confirmed']=face['authorized']
+            if observation.get('detector_hold'):
+                face['recognition_failure']='detector_hold'
+            elif not face.get('gallery_valid',False):
+                face['recognition_failure']=face.get('recognition_status','gallery_unavailable')
+            elif score is None or not np.isfinite(score):
+                face['recognition_failure']=face.get('recognition_status','embedding_unavailable')
+            elif float(score)<threshold:
+                face['recognition_failure']='similarity_below_threshold'
+            elif not face['authorized']:
+                face['recognition_failure']='confirmation_pending'
+            else:
+                face['recognition_failure']=''
             next_states[track]=state
 
         return next_states
@@ -275,13 +314,153 @@ class MainCamera:
             current.append(held)
         return current
 
+    @staticmethod
+    def _valid_rgb_frame(frame):
+        return (isinstance(frame,np.ndarray) and frame.size and frame.dtype==np.uint8 and
+                frame.ndim==3 and frame.shape[2]==3)
+
+    def _put_latest_frame(self,packet):
+        """Bound latency: replace the oldest unprocessed preview/AI frame."""
+        try:
+            self.frame_queue.put_nowait(packet)
+            return
+        except queue.Full:
+            pass
+        try:
+            self.frame_queue.get_nowait()
+            with self.lock:self.camera_buffer_drops+=1
+        except queue.Empty:
+            pass
+        try:self.frame_queue.put_nowait(packet)
+        except queue.Full:
+            with self.lock:self.camera_buffer_drops+=1
+
+    def _clear_frame_queue(self):
+        while True:
+            try:self.frame_queue.get_nowait()
+            except queue.Empty:return
+
+    def _camera_reader(self):
+        """The only thread that opens, reads and reconnects the live camera."""
+        cap=CameraManager(config=self.config,stop_event=self.stop_event)
+        backoff=float(getattr(self.config,'CAMERA_RECONNECT_BACKOFF_INITIAL',0.5))
+        maximum=max(backoff,float(getattr(self.config,'CAMERA_RECONNECT_BACKOFF_MAX',5.0)))
+        threshold=max(2,int(getattr(self.config,'CAMERA_RECONNECT_FAILURES',3)))
+        grace=max(0.0,float(getattr(self.config,'CAMERA_RECONNECT_GRACE_SECONDS',0.25)))
+        retry=max(0.01,float(getattr(self.config,'CAMERA_READ_RETRY_SECONDS',0.05)))
+        capture_id=0;origin=time.monotonic();failures=0;failed_at=None
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    cap.open()
+                    generation=getattr(cap,'generation',self.camera_generation or 1)
+                    with self.lock:
+                        self.camera_generation=generation
+                        self.camera_state='live';self.error=None
+                    break
+                except RuntimeError as exc:
+                    with self.lock:
+                        self.camera_state='reconnecting';self.error=str(exc)
+                        self.last_camera_error=str(exc)
+                    print('[Camera]',exc,flush=True)
+                    if self.stop_event.wait(min(maximum,backoff)):return
+                    backoff=min(maximum,backoff*2)
+            while not self.stop_event.is_set():
+                read_started=time.monotonic()
+                ok,frame=cap.read()
+                read_ms=(time.monotonic()-read_started)*1000
+                now=time.monotonic()
+                if ok and self._valid_rgb_frame(frame):
+                    if failures:
+                        print(f'[Camera] 일시 읽기 오류 복구 | 연속실패={failures}',flush=True)
+                    failures=0;failed_at=None;backoff=float(getattr(
+                        self.config,'CAMERA_RECONNECT_BACKOFF_INITIAL',0.5))
+                    generation=getattr(cap,'generation',self.camera_generation or 1)
+                    with self.lock:
+                        self.last_read_ms=read_ms;self.camera_frames_received+=1
+                        self.camera_generation=generation
+                        if self.camera_state!='live':self.error=None
+                        self.camera_state='live'
+                    self._put_latest_frame((frame,capture_id,now,(now-origin)*1000,generation))
+                    capture_id+=1
+                    continue
+
+                failures+=1
+                if failed_at is None:failed_at=now
+                reason=('빈 RGB 프레임' if ok else 'V4L2 프레임 읽기 실패')
+                with self.lock:
+                    self.last_read_ms=read_ms;self.last_camera_error=reason
+                if failures<threshold or now-failed_at<grace:
+                    self.stop_event.wait(retry)
+                    continue
+
+                reconnect_started=time.monotonic()
+                with self.lock:
+                    self.camera_state='reconnecting'
+                    self.error='카메라 연결 끊김: 재연결 중'
+                self._clear_frame_queue()
+                print(f'[Camera] 연속 읽기 실패 | 횟수={failures} | 경과={now-failed_at:.2f}s | 동일 장치 재연결 시도',flush=True)
+                while not self.stop_event.is_set():
+                    self.camera_reconnect_count+=1
+                    try:
+                        cap.reconnect()
+                        elapsed=time.monotonic()-reconnect_started
+                        generation=getattr(cap,'generation',self.camera_generation+1)
+                        with self.lock:
+                            self.camera_reconnect_successes+=1
+                            self.last_reconnect_seconds=elapsed
+                            self.camera_generation=generation
+                            self.camera_state='live';self.error=None
+                        print(f'[Camera] 재연결 성공 | 세대={generation} | 소요={elapsed:.2f}s',flush=True)
+                        failures=0;failed_at=None;backoff=float(getattr(
+                            self.config,'CAMERA_RECONNECT_BACKOFF_INITIAL',0.5))
+                        break
+                    except RuntimeError as exc:
+                        elapsed=time.monotonic()-reconnect_started
+                        with self.lock:
+                            self.last_camera_error=str(exc);self.last_reconnect_seconds=elapsed
+                            self.error='카메라 재연결 중: '+str(exc)
+                        print(f'[Camera] 재연결 실패 | 소요={elapsed:.2f}s | 원인={exc}',flush=True)
+                        if self.stop_event.wait(backoff):break
+                        backoff=min(maximum,backoff*2)
+        finally:
+            cap.release()
+
+    @staticmethod
+    def _current_rss_kib():
+        try:
+            with open('/proc/self/status',encoding='ascii') as source:
+                for line in source:
+                    if line.startswith('VmRSS:'):return int(line.split()[1])
+        except OSError:
+            pass
+        return None
+
+    def _resource_stats(self):
+        if not hasattr(self,'_perf_started'):
+            self._perf_started=time.monotonic();self._cpu_sample_at=self._perf_started
+            self._cpu_sample_value=time.process_time();self._cpu_percent=0.0
+        now=time.monotonic();cpu=time.process_time();wall=now-self._cpu_sample_at
+        if wall>=0.25:
+            self._cpu_percent=max(0.0,100*(cpu-self._cpu_sample_value)/wall)
+            self._cpu_sample_at=now;self._cpu_sample_value=cpu
+        elapsed=max(now-self._perf_started,1e-9)
+        return {'current_rss_kib':self._current_rss_kib(),
+                'peak_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                'cpu_percent_one_core':round(self._cpu_percent,1),
+                'camera_receive_fps':getattr(self,'camera_frames_received',0)/elapsed,
+                'ai_processing_fps':getattr(self,'ai_frames_processed',0)/elapsed,
+                'recording_fps':getattr(self,'recording_frames_accepted',0)/elapsed}
+
     def _loop(self):
-        cap=None
+        cap=None;camera_mode=False
         try:
             korean_font()
             self.adapter=self._adapter()
             self._load_people()
-            classifier=Classifier(Policy(track_iou=float(getattr(self.config,'FACE_AUTH_TRACK_IOU',0.35))))
+            classifier=Classifier(Policy(
+                track_iou=float(getattr(self.config,'FACE_AUTH_TRACK_IOU',0.35)),
+                track_max_seconds=float(getattr(self.config,'FACE_AUTH_HOLD_SECONDS',0.8))))
             display_states={}
             previous_observations=[];last_detected_at=-1e9;last_ai_error_log=0.0
             fps=getattr(self.config,'SELECTIVE_FPS',10)
@@ -294,80 +473,91 @@ class MainCamera:
             is_file=bool(source)
             if not self.test:
                 if not source:
-                    cap=CameraManager(config=self.config,stop_event=self.stop_event)
-                    while not self.stop_event.is_set():
-                        try:
-                            cap.open();self.error=None;break
-                        except RuntimeError as exc:
-                            self.error=str(exc);print('[Camera]',exc,flush=True)
-                            self.stop_event.wait(3)
+                    camera_mode=True
+                    self.reader_thread=threading.Thread(target=self._camera_reader,
+                        name='camera-reader',daemon=True)
+                    self.reader_thread.start()
                 else:
                     if not Path(source).is_file():raise RestoreError('설정한 입력 파일이 없습니다')
                     cap=cv2.VideoCapture(str(source))
                     if not cap.isOpened():raise RestoreError('파일 입력을 열 수 없습니다')
             capture=0;start=time.monotonic()
+            active_generation=None
             limit=int(os.environ.get('SRX_TEST_FRAMES','24')) if self.test else None
             while not self.stop_event.is_set():
-                tick=time.monotonic()
+                process_started=time.monotonic();generation=0
                 if self.test:
                     if capture>=limit:break
-                    frame=synthetic_frame(capture)
+                    capture_id=capture;frame=synthetic_frame(capture_id)
+                    timestamp=(process_started-start)*1000
+                elif camera_mode:
+                    try:
+                        frame,capture_id,captured_at,timestamp,generation=self.frame_queue.get(timeout=.25)
+                    except queue.Empty:
+                        continue
+                    if active_generation is None:
+                        active_generation=generation
+                    elif generation!=active_generation:
+                        # A completed chunk is already immutable.  Only the
+                        # uncommitted segment is discarded so frames from two
+                        # physical camera sessions can never share metadata.
+                        self.recorder.abort()
+                        classifier=Classifier(Policy(
+                            track_iou=float(getattr(self.config,'FACE_AUTH_TRACK_IOU',0.35)),
+                            track_max_seconds=float(getattr(self.config,'FACE_AUTH_HOLD_SECONDS',0.8))))
+                        display_states={};previous_observations=[];last_detected_at=-1e9
+                        self.alerts=self._alert_tracker();active_generation=generation
+                        print(f'[Camera] 새 연결 세대 적용 | generation={generation} | 미완성 청크 폐기',flush=True)
                 else:
                     read_started=time.monotonic()
                     ok,frame=cap.read()
                     self.last_read_ms=(time.monotonic()-read_started)*1000
                     if not ok:
-                        if is_file:break
-                        if self.recorder.duration:self.recorder.abort()
-                        else:self.recorder.flush()
-                        classifier=Classifier(Policy(track_iou=float(getattr(self.config,'FACE_AUTH_TRACK_IOU',0.35))))
-                        display_states={};previous_observations=[];last_detected_at=-1e9
-                        self.alerts=self._alert_tracker()
-                        with self.lock:
-                            self.error='카메라 연결 끊김: 재연결 중';self.preview=None;self.raw=None;self.faces=[]
-                        print('[Camera] 프레임 읽기 실패: 동일 장치 재연결 시도',flush=True)
-                        while not self.stop_event.wait(2):
-                            try:
-                                cap.reconnect();self.error=None;break
-                            except RuntimeError as exc:
-                                self.error=str(exc);print('[Camera]',exc,flush=True)
-                        continue
+                        break
+                    capture_id=capture
+                    timestamp=cap.get(cv2.CAP_PROP_POS_MSEC)
                 width=getattr(self.config,'PROCESS_WIDTH',640)
                 if width and frame.shape[1]>width:
                     height=int(frame.shape[0]*width/frame.shape[1])//2*2
                     frame=cv2.resize(frame,(width//2*2,height))
+                observation_time=captured_at if camera_mode else process_started
+                ai_started=time.monotonic()
                 try:
-                    detected=self.adapter.observe(frame,capture)
+                    with self.inference_lock:
+                        detected=self.adapter.observe(frame,capture_id)
                 except Exception as exc:
                     with self.lock:
                         self.error=f'AI 프레임 처리 오류: {exc}';self.faces=[]
-                    if tick-last_ai_error_log>=5:
-                        print(f'[AI][ERROR] 프레임 {capture} 처리 실패: {exc}',flush=True)
-                        last_ai_error_log=tick
+                    if process_started-last_ai_error_log>=5:
+                        print(f'[AI][ERROR] 프레임 {capture_id} 처리 실패: {exc}',flush=True)
+                        last_ai_error_log=process_started
                     self.stop_event.wait(.25)
                     continue
+                self.last_ai_ms=(time.monotonic()-ai_started)*1000
                 if detected:
-                    last_detected_at=tick
+                    last_detected_at=observation_time
                 observations=self._hold_detector_dropouts(
-                    detected,previous_observations,last_detected_at,tick)
-                faces=classifier.classify(observations,capture)
-                timestamp=cap.get(cv2.CAP_PROP_POS_MSEC) if cap is not None and is_file else (tick-start)*1000
-                display_states=self._update_display_authorization(faces,observations,display_states,tick)
+                    detected,previous_observations,last_detected_at,observation_time)
+                faces=classifier.classify(observations,capture_id,observed_at=observation_time)
+                display_states=self._update_display_authorization(
+                    faces,observations,display_states,observation_time)
                 names=self._apply_access(faces,display_states)
-                alerts=self.alerts.update(faces,tick)
+                alerts=self.alerts.update(faces,observation_time)
                 if alerts:self._record_alerts(alerts,faces,names)
                 previous_observations=list(observations)
-                self.recorder.add(frame,faces,capture,timestamp)
+                self.recorder.add(frame,faces,capture_id,timestamp)
                 protected=protect(frame,faces)[0]
                 ok,jpg=cv2.imencode('.jpg',protected)
                 if not ok:raise RestoreError('보호 프레임 인코딩 실패')
                 with self.lock:
                     self.preview=jpg.tobytes();self.raw=frame.copy();self.faces=faces
                     self.last_preview_at=time.monotonic();self.frame_sequence+=1
-                    self.last_process_ms=(self.last_preview_at-tick)*1000
-                    self.error=None;self.metrics=self.recorder.stats()
+                    self.ai_frames_processed+=1;self.recording_frames_accepted+=1
+                    self.last_process_ms=(self.last_preview_at-process_started)*1000
+                    if not camera_mode or self.camera_state=='live':self.error=None
+                    self.metrics=self.recorder.stats()
                 capture+=1
-                self.stop_event.wait(max(0,1/fps-(time.monotonic()-tick)))
+                self.stop_event.wait(max(0,1/fps-(time.monotonic()-process_started)))
             report=self.recorder.finish()
             with self.lock:self.metrics=report
         except Exception as exc:
@@ -376,8 +566,13 @@ class MainCamera:
             print(f'[Camera][ERROR] 처리 스레드 종료: {exc}',flush=True)
             traceback.print_exc()
         finally:
+            self.stop_event.set()
             if cap:cap.release()
-            with self.lock:self.running=False
+            if self.reader_thread and self.reader_thread is not threading.current_thread():
+                self.reader_thread.join(timeout=5)
+            with self.lock:
+                self.running=False
+                if self.camera_state=='live':self.camera_state='stopped'
 
     def stop(self):
         self.stop_event.set()
@@ -397,17 +592,32 @@ class MainCamera:
             return cv2.imencode('.jpg',self.raw)[1].tobytes()
     def capture_raw_frame(self):
         with self.lock:return None if self.raw is None else self.raw.copy()
+    def capture_raw_snapshot(self):
+        """Return a registration-safe copy plus its processed-frame identity."""
+        with self.lock:
+            return (None if self.raw is None else self.raw.copy(),self.frame_sequence,
+                    self.last_preview_at,self.camera_generation)
+    def detect_registration_face(self,frame,max_num=2):
+        """Serialize registration SCRFD with the live Hailo/CPU inference path."""
+        with self.inference_lock:
+            return self.detector.detect(frame,max_num=max_num,metric='default')
+    def registration_embedding(self,frame,landmarks):
+        """Use the exact live ArcFace alignment and recognizer instance."""
+        with self.inference_lock:
+            aligned=self.adapter.align(frame,landmark=landmarks,image_size=112)
+            return self.recognizer.get_feat(aligned)
     def get_stats(self):
         with self.lock:
             age=None if self.last_preview_at is None else max(0.0,time.monotonic()-self.last_preview_at)
             stale=float(getattr(self.config,'CAMERA_STALE_SECONDS',3.0))
             ready=(self.running and self.error is None and self.preview is not None and
-                   age is not None and age<=stale)
-            state=('live' if ready else 'error' if self.error else
+                   age is not None and age<=stale and getattr(self,'camera_state','live')!='reconnecting')
+            state=('live' if ready else 'reconnecting' if getattr(self,'camera_state','')=='reconnecting' else
+                   'error' if self.error else
                    'stale' if self.running and self.preview is not None else
                    'starting' if self.running else 'stopped')
             real_faces=[f for f in self.faces if not f.get('detector_hold',False)]
-            return {'employee_count':sum(f.get('authorized',False) for f in real_faces),
+            stats={'employee_count':sum(f.get('authorized',False) for f in real_faces),
                     'unknown_count':sum(not f.get('authorized',False) for f in real_faces),
                     'denied_count':sum(not f.get('allowed',False) for f in real_faces),
                     'detected_face_count':len(real_faces),
@@ -415,12 +625,28 @@ class MainCamera:
                     'recording':ready,'error':self.error,'camera_ready':ready,
                     'camera_state':state,'model_backend':self.model_backend,
                     'frame_sequence':self.frame_sequence,
-                    'alert_seq':self.alert_seq,'recent_alerts':list(self.alert_events),
-                    'access_env':self.access_env.get(),
+                    'alert_seq':getattr(self,'alert_seq',0),
+                    'recent_alerts':list(getattr(self,'alert_events',())),
+                    'access_env':self.access_env.get() if hasattr(self,'access_env') else {},
                     'frame_age_ms':None if age is None else round(age*1000,1),
                     'camera_read_ms':round(self.last_read_ms,1),
+                    'ai_inference_ms':round(getattr(self,'last_ai_ms',0.0),1),
                     'frame_process_ms':round(self.last_process_ms,1),
                     'selective_restore':True,'camera':dict(SELECTED),**self.metrics}
+            stats.update(self._resource_stats())
+            frame_queue=getattr(self,'frame_queue',None)
+            stats.update({'queue_capacity':frame_queue.maxsize if frame_queue else 0,
+                          'queue_depth':frame_queue.qsize() if frame_queue else 0,
+                          'camera_buffer_drops':getattr(self,'camera_buffer_drops',0),
+                          'camera_frames_received':getattr(self,'camera_frames_received',0),
+                          'ai_frames_processed':getattr(self,'ai_frames_processed',0),
+                          'recording_frames_accepted':getattr(self,'recording_frames_accepted',0),
+                          'camera_generation':getattr(self,'camera_generation',0),
+                          'camera_reconnect_count':getattr(self,'camera_reconnect_count',0),
+                          'camera_reconnect_successes':getattr(self,'camera_reconnect_successes',0),
+                          'last_camera_error':getattr(self,'last_camera_error',None),
+                          'last_reconnect_seconds':getattr(self,'last_reconnect_seconds',None)})
+            return stats
     def get_save_progress(self):
         with self.lock:return self.recorder.progress() if self.recorder else {'in_progress':False}
     def get_perf(self):
@@ -434,6 +660,9 @@ class MainCamera:
                 'detector_confidence':f.get('quality'),
                 'arcface_similarity':f.get('similarity'),
                 'recognition_status':f.get('recognition_status','unknown'),
+                'recognition_failure':f.get('recognition_failure','unknown'),
+                'match_count':int(f.get('match_count',0)),
+                'recognition_confirmed':bool(f.get('recognition_confirmed',False)),
                 'authorized':bool(f.get('authorized',False)),
                 'allowed':bool(f.get('allowed',False)),
                 'access_reason':f.get('access_reason',''),
@@ -445,6 +674,8 @@ class MainCamera:
             'hailo_scrfd':float(getattr(self.config,'HAILO_DET_THRESH',0.5)),
             'cpu_scrfd':float(getattr(self.config,'CPU_SCRFD_DET_THRESHOLD',0.6)),
         }
+        adapter=getattr(self,'adapter',None)
+        stats['gallery']=dict(getattr(adapter,'gallery_info',{})) if adapter else {}
         return stats
     def web_state(self):
         stats=self.get_stats()

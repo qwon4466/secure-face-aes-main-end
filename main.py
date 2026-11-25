@@ -32,6 +32,7 @@ import json
 import os
 import secrets
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -52,7 +53,9 @@ import config as c
 import event_log
 
 from core.selective_camera import MainCamera as CameraProcessor, DB_PATH, _adapt_array, _convert_array
-from core.selective_recognition import stable_person_id
+from core.selective_recognition import (RegistrationFrameSelector,
+                                        registration_face, stable_person_id,
+                                        valid_embedding)
 from core.access_policy import parse_floors, stored_floors
 from core.retention import cleanup as retention_cleanup
 from core.selective_routes import create_router as create_selective_router
@@ -82,6 +85,7 @@ camera.on_alert = lambda face, person: event_log.log_detection(
 _RESTORE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aes-restore")
 _RESTORE_LOCK = threading.Lock()
 _RESTORE_JOBS: dict[str, dict] = {}
+_REGISTRATION_LOCK = threading.Lock()
 
 
 # ── DB 초기화 ─────────────────────────────────────────────────────────────
@@ -642,6 +646,39 @@ class RegisterCapture(BaseModel):
     floors: list[int] | None = None
 
 
+_REGISTRATION_ERRORS = {
+    'face_not_detected':'얼굴을 찾을 수 없습니다.',
+    'multiple_faces':'한 사람만 화면에 나오도록 해주세요.',
+    'landmarks_missing':'얼굴 특징점을 찾을 수 없습니다.',
+    'low_detection_confidence':'얼굴 검출 신뢰도가 낮습니다.',
+    'face_too_small':'얼굴이 너무 작습니다. 카메라에 조금 더 가까이 와주세요.',
+    'landmarks_invalid':'얼굴 특징점이 올바르지 않습니다.',
+    'landmarks_outside_face':'얼굴 특징점 위치가 불안정합니다.',
+    'landmark_geometry_invalid':'눈·코·입 특징점 품질이 부족합니다.',
+    'embedding_invalid':'ArcFace 특징 벡터를 생성하지 못했습니다.',
+    'different_person':'촬영 중 다른 얼굴이 감지되었습니다.',
+    'duplicate_pose':'이미 수집한 각도와 너무 유사합니다.',
+    'duplicate_frame':'새 카메라 프레임을 기다리는 중입니다.',
+}
+
+def _registration_candidate(frame):
+    boxes,landmarks=camera.detect_registration_face(frame,max_num=2)
+    candidate,reason=registration_face(
+        frame,boxes,landmarks,
+        min_confidence=float(getattr(c,'REGISTER_MIN_DET_CONFIDENCE',0.6)),
+        min_face_size=int(getattr(c,'REGISTER_MIN_FACE_SIZE',64)))
+    if candidate is None:return None,None,reason
+    embedding=np.asarray(camera.registration_embedding(frame,candidate['landmarks']))
+    expected=getattr(camera.adapter,'gallery_info',{}).get('embedding_dimension')
+    if not valid_embedding(embedding,expected):return None,None,'embedding_invalid'
+    return candidate,embedding,''
+
+def _unique_registered_image_path(filename):
+    path=Path(IMAGE_DIR)/filename
+    if not path.exists():return str(path)
+    return str(path.with_name(path.stem+'-'+uuid.uuid4().hex[:8]+path.suffix))
+
+
 def _do_register(frame, name: str, group: str, floors=None) -> dict:
     """단일 프레임으로 얼굴 탐지 → 각도 판별 → DB 등록."""
     try:
@@ -651,16 +688,11 @@ def _do_register(frame, name: str, group: str, floors=None) -> dict:
     if frame is None:
         return {"status": "error", "message": "❌ 카메라 프레임이 없습니다."}
 
-    from insightface.utils import face_align
-    detector = camera.detector
-    recognizer = camera.recognizer
-
-    bboxes, kpss = detector.detect(frame, max_num=1, metric="default")
-    if bboxes is None or len(bboxes) == 0:
-        return {"status": "error", "message": "❌ 얼굴을 찾을 수 없습니다."}
-
-    x1, y1, x2, y2 = bboxes[0, :4].astype(int).tolist()
-    lm = kpss[0]
+    candidate,emb,reason=_registration_candidate(frame)
+    if candidate is None:
+        return {"status":"error","message":"❌ "+_REGISTRATION_ERRORS[reason],
+                "quality":{"reason":reason}}
+    x1,y1,x2,y2=candidate['bbox'];lm=candidate['landmarks']
 
     # 측면 판별 (눈-코 거리 비율)
     le, re, nose = lm[0], lm[1], lm[2]
@@ -670,11 +702,6 @@ def _do_register(frame, name: str, group: str, floors=None) -> dict:
     eye_dist = np.linalg.norm(le - re)
     is_side = ratio > 1.5 or (eye_dist / (x2 - x1 + 1e-5)) < 0.25
 
-    aligned = face_align.norm_crop(frame, landmark=lm, image_size=112)
-    emb = recognizer.get_feat(aligned)
-    if emb is None:
-        return {"status": "error", "message": "❌ 임베딩 추출 실패"}
-
     if not is_side:
         tag, fname = "정면", f"{name}_정면.jpg"
     else:
@@ -683,8 +710,9 @@ def _do_register(frame, name: str, group: str, floors=None) -> dict:
         else:
             tag, fname = "우측면", f"{name}_측면2(우).jpg"
 
-    fpath = os.path.join(IMAGE_DIR, fname)
-    cv2.imwrite(fpath, frame)
+    fpath = _unique_registered_image_path(fname)
+    if not cv2.imwrite(fpath,frame):
+        return {"status":"error","message":"❌ 등록 이미지 저장 실패"}
 
     conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
     conn.execute(
@@ -695,8 +723,10 @@ def _do_register(frame, name: str, group: str, floors=None) -> dict:
     conn.commit()
     conn.close()
 
-    camera.reload_db()
-    return {"status": "success", "message": f"✅ [{name}] {tag} 등록 성공!"}
+    gallery=camera.reload_db()
+    return {"status":"success","message":f"✅ [{name}] {tag} 등록 성공!",
+            "quality":{"pose":candidate['pose'],'confidence':candidate['confidence'],
+                       "gallery_valid_embeddings":gallery.get('valid_embeddings',0)}}
 
 
 @app.post("/api/register", dependencies=[Depends(require_admin)])
@@ -705,12 +735,16 @@ async def api_register(data: RegisterData):
     try:
         if camera is None:
             return {"status": "error", "message": "서버 초기화 중입니다. 잠시 후 시도하세요."}
-        _, encoded = data.image_base64.split(",", 1)
-        frame = cv2.imdecode(
-            np.frombuffer(base64.b64decode(encoded), np.uint8),
-            cv2.IMREAD_COLOR,
-        )
-        return _do_register(frame, data.name, data.group, data.floors)
+        if not _REGISTRATION_LOCK.acquire(blocking=False):
+            return {"status":"error","message":"다른 얼굴 등록이 진행 중입니다."}
+        try:
+            _, encoded = data.image_base64.split(",", 1)
+            frame = cv2.imdecode(
+                np.frombuffer(base64.b64decode(encoded), np.uint8),
+                cv2.IMREAD_COLOR,
+            )
+            return _do_register(frame, data.name, data.group, data.floors)
+        finally:_REGISTRATION_LOCK.release()
     except Exception as e:
         return {"status": "error", "message": f"서버 오류: {e}"}
 
@@ -721,8 +755,12 @@ async def api_register_capture(data: RegisterCapture):
     try:
         if camera is None:
             return {"status": "error", "message": "서버 초기화 중입니다. 잠시 후 시도하세요."}
-        frame = camera.capture_raw_frame()
-        return _do_register(frame, data.name, data.group, data.floors)
+        if not _REGISTRATION_LOCK.acquire(blocking=False):
+            return {"status":"error","message":"다른 얼굴 등록이 진행 중입니다."}
+        try:
+            frame = camera.capture_raw_frame()
+            return _do_register(frame, data.name, data.group, data.floors)
+        finally:_REGISTRATION_LOCK.release()
     except Exception as e:
         return {"status": "error", "message": f"서버 오류: {e}"}
 
@@ -732,8 +770,7 @@ class RegisterContinuous(BaseModel):
     group: str
     floors: list[int] | None = None
 
-@app.post("/api/register_continuous_realsense", dependencies=[Depends(require_admin)])
-async def api_register_continuous_realsense(data: RegisterContinuous):
+async def _register_continuous_realsense(data: RegisterContinuous):
     """
     프론트엔드의 트리거 신호를 받아 약 3~4초간 연속으로 프레임을 캡처하고,
     얼굴을 탐지하여 다각도의 특징점(Vector)을 DB에 일괄 등록합니다.
@@ -751,64 +788,85 @@ async def api_register_continuous_realsense(data: RegisterContinuous):
     interval = 0.2          # 0.2초 간격 (초당 5프레임)
     max_frames = int(capture_duration / interval)
     
-    valid_faces = 0
-    from insightface.utils import face_align
-    detector = camera.detector
-    recognizer = camera.recognizer
-    
-    # DB 연결
-    conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
-    
-    try:
-        for i in range(max_frames):
-            # 1. RealSense 카메라 원본 프레임 가져오기
-            frame = camera.capture_raw_frame()
-            if frame is None:
-                await asyncio.sleep(interval)
-                continue
-            
-            # 2. 얼굴 탐지 (SCRFD)
-            bboxes, kpss = detector.detect(frame, max_num=1, metric="default")
-            if bboxes is not None and len(bboxes) > 0:
-                lm = kpss[0]
-                
-                # 3. 얼굴 정렬 및 임베딩(특징점) 추출
-                aligned = face_align.norm_crop(frame, landmark=lm, image_size=112)
-                emb = recognizer.get_feat(aligned)
-                
-                if emb is not None:
-                    # 파일명 생성 및 이미지 저장
-                    fname = f"{data.name}_연속_{i}.jpg"
-                    fpath = os.path.join(IMAGE_DIR, fname)
-                    cv2.imwrite(fpath, frame)
-                    
-                    # DB 저장 (이름 뒤에 _연속_번호 를 붙여 구분)
-                    conn.execute(
-                        "INSERT INTO users (name, auth_group, image_path, vector) VALUES (?,?,?,?)",
-                        (f"{data.name}_연속_{i}", data.group, fpath, emb),
-                    )
-                    valid_faces += 1
-            
-            # 다음 캡처까지 대기 (비동기 딜레이)
-            await asyncio.sleep(interval)
+    samples=[];skipped={};anchor=None
+    pose_limit=max(1,int(getattr(c,'REGISTER_POSE_BUCKET_LIMIT',8)))
+    pose_delta=max(0.0,float(getattr(c,'REGISTER_POSE_MIN_DELTA',0.04)))
+    selector=RegistrationFrameSelector(pose_limit,pose_delta)
 
-        if valid_faces > 0:
-            _save_access(conn, data.name, floors)
+    for _ in range(max_frames):
+        frame,sequence,captured_at,generation=camera.capture_raw_snapshot()
+        if frame is None:
+            skipped['frame_unavailable']=skipped.get('frame_unavailable',0)+1
+            await asyncio.sleep(interval);continue
+        frame_reason=selector.check_frame(sequence,generation)
+        if frame_reason=='duplicate_frame':
+            skipped[frame_reason]=skipped.get(frame_reason,0)+1
+            await asyncio.sleep(interval);continue
+        if frame_reason=='camera_generation_changed':
+            return {"status":"error","message":"카메라가 재연결되었습니다. 등록을 다시 시작해주세요.",
+                    "quality":{"valid_frames":len(samples),'reason':'camera_generation_changed'}}
+
+        candidate,embedding,reason=_registration_candidate(frame)
+        if candidate is None:
+            skipped[reason]=skipped.get(reason,0)+1
+            await asyncio.sleep(interval);continue
+        if anchor is not None and camera.adapter.cosine(embedding,anchor)<float(c.MATCH_THRESHOLD):
+            skipped['different_person']=skipped.get('different_person',0)+1
+            await asyncio.sleep(interval);continue
+        pose=candidate['pose'];yaw=candidate['yaw']
+        if not selector.accept_pose(pose,yaw):
+            skipped['duplicate_pose']=skipped.get('duplicate_pose',0)+1
+            await asyncio.sleep(interval);continue
+        if anchor is None:anchor=embedding
+        samples.append((frame,embedding,candidate))
+        await asyncio.sleep(interval)
+
+    valid_faces=len(samples)
+    conn=sqlite3.connect(DB_PATH,detect_types=sqlite3.PARSE_DECLTYPES)
+    try:
+        next_index=0
+        while os.path.exists(os.path.join(IMAGE_DIR,f"{data.name}_연속_{next_index}.jpg")):
+            next_index+=1
+        for offset,(frame,embedding,candidate) in enumerate(samples):
+            sample_index=next_index+offset
+            fname=f"{data.name}_연속_{sample_index}.jpg"
+            fpath=os.path.join(IMAGE_DIR,fname)
+            if not cv2.imwrite(fpath,frame):raise OSError('등록 이미지 저장 실패')
+            conn.execute(
+                "INSERT INTO users (name, auth_group, image_path, vector) VALUES (?,?,?,?)",
+                (f"{data.name}_연속_{sample_index}",data.group,fpath,embedding))
+        if valid_faces>0:_save_access(conn,data.name,floors)
         conn.commit()
     except Exception as e:
         conn.rollback()
         print(f"❌ 등록 중 오류 발생: {e}")
-        return {"status": "error", "message": f"등록 중 서버 오류 발생: {e}"}
+        return {"status":"error","message":f"등록 중 서버 오류 발생: {e}"}
     finally:
         conn.close()
 
-    # 4. 결과 판별 및 DB 리로드
     if valid_faces > 0:
-        camera.reload_db()  # 새로 등록된 데이터 즉시 반영
+        gallery=camera.reload_db()
+        poses={key:len(value) for key,value in selector.pose_yaws.items()}
+        missing=[key for key,count in poses.items() if count==0]
+        guidance=(" 누락 각도: "+", ".join(missing)+" — 해당 방향을 추가 등록하면 안정성이 향상됩니다."
+                  if missing else " 정면·좌·우 각도가 모두 수집되었습니다.")
         print(f"✅ [{data.name}] 총 {valid_faces}개의 얼굴 각도 등록 완료.")
-        return {"status": "success", "message": f"총 {valid_faces}개의 얼굴 각도가 성공적으로 등록되었습니다."}
+        return {"status":"success",
+                "message":f"총 {valid_faces}개의 유효 얼굴이 등록되었습니다.{guidance}",
+                "quality":{"valid_frames":valid_faces,"poses":poses,"skipped":skipped,
+                           "gallery_valid_embeddings":gallery.get('valid_embeddings',0)}}
     else:
-        return {"status": "error", "message": "얼굴을 제대로 인식하지 못했습니다. 밝은 곳에서 정면을 보고 다시 시도해주세요."}
+        reason=max(skipped,key=skipped.get) if skipped else 'face_not_detected'
+        return {"status":"error",
+                "message":"얼굴 등록 품질이 부족합니다. "+_REGISTRATION_ERRORS.get(reason,'다시 시도해주세요.'),
+                "quality":{"valid_frames":0,"skipped":skipped,"reason":reason}}
+
+@app.post("/api/register_continuous_realsense", dependencies=[Depends(require_admin)])
+async def api_register_continuous_realsense(data: RegisterContinuous):
+    if not _REGISTRATION_LOCK.acquire(blocking=False):
+        return {"status":"error","message":"다른 얼굴 등록이 진행 중입니다."}
+    try:return await _register_continuous_realsense(data)
+    finally:_REGISTRATION_LOCK.release()
 
 # ── API — 보호 자산 목록 (Phase 4) ───────────────────────────────────────
 @app.get("/api/assets", dependencies=[Depends(require_admin)])
@@ -918,6 +976,50 @@ async def api_asset_detail(chunk_id: str):
         if item["chunk_id"] == chunk_id:
             return item | {"frames": []}
     raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
+
+
+# ── 보호(블러) 영상 재생 ──────────────────────────────────────────────────
+# 컨테이너의 protected 구역은 이미 블러된 영상이라 암호화되어 있지 않다. 그래서 복원 비밀번호 없이
+# 관리자 로그인만으로 볼 수 있다. 브라우저가 재생하지 못하는 FFV1 AVI를 청크마다 한 번 MP4로
+# 바꿔 복원 결과 폴더에 두고(오래된 녹화 자동 삭제가 24시간 뒤 정리) 다시 쓴다.
+_PROTECTED_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _convert_protected(chunk_path: Path, out: Path):
+    from core.selective_crypto import section_bytes
+    out.parent.mkdir(parents=True, exist_ok=True)
+    src = out.with_name(out.name + ".src.avi")
+    tmp = out.with_name(out.name + ".tmp.mp4")
+    try:
+        src.write_bytes(section_bytes(chunk_path, "protected"))
+        run = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+             "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+             "-movflags", "+faststart", str(tmp)],
+            capture_output=True, timeout=180)
+        if run.returncode:
+            raise RuntimeError(run.stderr.decode(errors="replace")[-300:])
+        os.replace(tmp, out)
+    finally:
+        src.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
+
+
+@app.get("/api/assets/{chunk_id}/protected.mp4", dependencies=[Depends(require_admin)])
+async def api_asset_protected_video(chunk_id: str):
+    try:
+        path = find_selective(camera.chunks, chunk_id)   # chunk_id 형식 검사 포함
+    except Exception:
+        raise HTTPException(status_code=404, detail="청크를 찾을 수 없습니다.")
+    out = camera.root / (".results" if camera.operational else "results") / f"protected-{chunk_id}.mp4"
+    async with _PROTECTED_LOCKS.setdefault(chunk_id, asyncio.Lock()):
+        if not out.is_file():
+            try:
+                await asyncio.to_thread(_convert_protected, path, out)
+            except Exception as exc:
+                print(f"[ASSETS][ERROR] 보호 영상 변환 실패 | 청크={chunk_id} | 원인={exc}", flush=True)
+                raise HTTPException(status_code=500, detail="보호 영상을 준비하지 못했습니다.")
+    return FileResponse(out, media_type="video/mp4", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/decryption_page")

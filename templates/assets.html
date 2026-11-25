@@ -129,6 +129,9 @@
     .btn-primary:hover { background: #2563EB; }
     .btn-ghost { background: #F1F5F9; color: #475569; }
     .btn-ghost:hover { background: #E2E8F0; }
+    .protected-video { width: 100%; max-height: 65vh; background: #000; border-radius: 10px; }
+    .video-status { font-size: 13px; color: #64748B; padding: 10px 12px; background: #F8FAFC; border-radius: 8px; }
+    .video-status.error { color: #B91C1C; background: #FEF2F2; }
 
     /* ── 프레임 그리드 ── */
     .section-title {
@@ -328,9 +331,31 @@
   }
 
   function renderDetail(d) {
-    // 집단별 선택 복원 형식 → 선택 복원 화면으로 이동
+    // 집단별 선택 복원 형식 → 블러(보호) 영상을 바로 재생하고, 복원은 버튼으로 이동
     if (d.format === 'selective') {
-      location.href = '/selective/?chunk=' + encodeURIComponent(d.chunk_id);
+      const id = encodeURIComponent(d.chunk_id);
+      const panel = document.getElementById('detailPanel');
+      panel.innerHTML = `
+        <div class="detail-header">
+          <div>
+            <div class="detail-title"></div>
+            <div class="detail-sub"></div>
+          </div>
+          <a class="btn btn-primary" href="/selective/?chunk=${id}" style="text-decoration:none;">복원</a>
+        </div>
+        <div class="video-status">보호 영상 준비 중… (처음 열 때 한 번 변환하므로 잠시 걸립니다)</div>
+        <video class="protected-video" controls autoplay muted playsinline preload="auto"></video>`;
+      panel.querySelector('.detail-title').textContent = `${d.date || ''} ${d.start_time || ''}`.trim() || d.chunk_id;
+      panel.querySelector('.detail-sub').textContent =
+        `블러 처리된 영상 · ${chunkDurationLabel(d.duration_seconds)} · ${d.frame_count ?? '-'}프레임 · 얼굴 ${d.total_faces ?? 0}건`;
+      const video = panel.querySelector('video');
+      const status = panel.querySelector('.video-status');
+      video.addEventListener('loadeddata', () => { status.remove(); });
+      video.addEventListener('error', () => {
+        status.textContent = '보호 영상을 불러오지 못했습니다. 잠시 후 다시 선택해 주세요.';
+        status.classList.add('error');
+      });
+      video.src = `/api/assets/${id}/protected.mp4`;
       return;
     }
     // AES 원본 저장 형식 → 원본 복원 화면에서 확인

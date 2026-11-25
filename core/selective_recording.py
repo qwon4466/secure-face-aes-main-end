@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import cv2
@@ -14,6 +15,30 @@ import numpy as np
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from .selective_recognition import Classifier, synthetic_frame
 from .selective_crypto import MAX_FRAMES, MAX_RAW, MAX_CHUNK_RAW, MAX_PIXELS, RestoreError, canonical, private_dir, save_chunk, write_new
+
+
+class _EncryptedFrames(Sequence):
+    """Read-only lazy view of the recorder's in-memory encrypted frames.
+
+    Chunk saving used to decrypt every frame into a second full-size list before
+    calling ``save_chunk``.  Keeping the encrypted capture buffer as the only
+    full raw-frame collection materially lowers the 60-second boundary peak,
+    while preserving the existing on-disk format byte-for-byte.
+    """
+    def __init__(self, frames, cipher, shape):
+        self._frames=frames;self._cipher=cipher;self._shape=shape
+        self.shape=shape
+        self.total_nbytes=len(frames)*int(np.prod(shape))
+
+    def __len__(self):
+        return len(self._frames)
+
+    def __getitem__(self, index):
+        if isinstance(index,slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        nonce,data=self._frames[index]
+        raw=self._cipher.decrypt(nonce,data,None)
+        return np.frombuffer(raw,dtype=np.uint8).reshape(self._shape)
 
 class Recorder:
     """Bounded recording with at most one background chunk save."""
@@ -71,8 +96,7 @@ class Recorder:
         frames,faces,timing,shape,cipher,chunk_wall,elapsed,final_path=payload
         t=time.perf_counter();actual_fps=len(frames)/elapsed
         dropped=max(0,round(self.fps*elapsed)-len(frames)) if self.duration else 0
-        originals=[np.frombuffer(cipher.decrypt(nonce,data,None),dtype=np.uint8).reshape(shape)
-                   for nonce,data in frames]
+        originals=_EncryptedFrames(frames,cipher,shape)
         try:
             chunk=save_chunk(self.output,originals,faces,timing,self.keys,self.session,
                              actual_fps,final_path=final_path,duration=elapsed,drops=dropped,
@@ -84,7 +108,7 @@ class Recorder:
         if self.duration:
             total=sum(f.stat().st_size for f in chunk.iterdir() if f.is_file())/1048576
             end=datetime.now(ZoneInfo('Asia/Seoul'));capture_end=chunk_wall+timedelta(seconds=elapsed)
-            print(f'[CHUNK] 저장 완료 | 시작={chunk_wall:%Y-%m-%d %H:%M:%S} KST | 촬영종료={capture_end:%Y-%m-%d %H:%M:%S} KST | 저장완료={end:%Y-%m-%d %H:%M:%S} KST | 경로={chunk.relative_to(self.output)} | 목표={self.duration:g}초 | 길이={elapsed:.2f}초 | 프레임={len(originals)} | FPS={actual_fps:.2f} | 드롭={dropped} | 크기={total:.1f}MB',flush=True)
+            print(f'[CHUNK] 저장 완료 | 시작={chunk_wall:%Y-%m-%d %H:%M:%S} KST | 촬영종료={capture_end:%Y-%m-%d %H:%M:%S} KST | 저장완료={end:%Y-%m-%d %H:%M:%S} KST | 경로={chunk.relative_to(self.output)} | 목표={self.duration:g}초 | 길이={elapsed:.2f}초 | 프레임={len(frames)} | FPS={actual_fps:.2f} | 드롭={dropped} | 크기={total:.1f}MB',flush=True)
         with self._state_lock:
             self.latencies.append(time.perf_counter()-t);self.chunks.append(chunk.name)
         if self.on_chunk:self.on_chunk(chunk)

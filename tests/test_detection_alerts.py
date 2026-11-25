@@ -49,10 +49,11 @@ def test_detector_hold_does_not_confirm_alone():
     assert sum(run(AlertTracker(1.0, 5.0), frames), []) == []
 
 
-def test_monitor_alert_popup_closes_only_with_confirm():
+def test_monitor_alert_popup_closes_only_with_confirm_or_alert_off():
     html = (Path(__file__).parents[1] / 'templates' / 'monitor.html').read_text(encoding='utf-8')
     assert 'id="alertOverlay"' in html and 'id="alertConfirm"' in html
     assert "alertOverlay.hidden = true" in html
-    assert html.count("alertOverlay.hidden = true") == 1   # 확인 버튼 외에 닫는 경로 없음
+    assert html.count("alertOverlay.hidden = true") == 2   # 확인 버튼과 알림 OFF만 닫는다
+    assert "if (!alertsEnabled) {\n      alertOverlay.hidden = true" in html
     assert 'setTimeout(() => el.remove()' not in html      # 자동으로 사라지는 토스트 제거
     assert 'alert_seq' in html
